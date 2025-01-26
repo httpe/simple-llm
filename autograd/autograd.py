@@ -37,7 +37,7 @@ class Value:
         label = f"{self.label}: " if self.label != "" else ""
         return f"Value({label}{self.data}, grad={self.grad})"
 
-    def __add__(self, other0: "Value | float | int"):
+    def __add__(self, other0: "Value | float | int") -> "Value":
         '''Allow adding two nodes with "+" operator'''
 
         if isinstance(other0, (float, int)):
@@ -61,18 +61,18 @@ class Value:
         
         return o
     
-    def __radd__(self, left):
+    def __radd__(self, left) -> "Value":
         return self + left
 
-    def __sub__(self, other):
+    def __sub__(self, other) -> "Value":
         # use plus to implement subtraction
         return self + -1.0 * other
     
-    def __rsub__(self, left):
+    def __rsub__(self, left) -> "Value":
         # use plus to implement subtraction
         return left + (-1.0 * self)
     
-    def __mul__(self, other0: "Value | float | int"):
+    def __mul__(self, other0: "Value | float | int") -> "Value":
         
         if isinstance(other0, (float, int)):
             other = Value(other0)
@@ -90,11 +90,11 @@ class Value:
         o = Value(r, _children=children, _backward=backward)
 
         return o
-    
-    def __rmul__(self, left):
+
+    def __rmul__(self, left) -> "Value":
         return self * left
 
-    def tanh(self):
+    def tanh(self) -> "Value":
         ''' Tanh activation function '''
 
         num = math.exp(2 * self.data) - 1
@@ -108,7 +108,7 @@ class Value:
         o = Value(r, _children=set([self]), _backward=backward)
         return o
 
-    def relu(self):
+    def relu(self) -> "Value":
         ''' ReLU activation function '''
 
         if self.data > 0:
