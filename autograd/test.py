@@ -42,23 +42,28 @@ def test_linear_regression():
     a = Value(1.0)
     b = Value(0.0)
 
+    # training loop
     for i in range(1000):
+        # calculate loss
         y_est = [a * x_i + b for x_i in x] # our autograd doesn't support vectorized operations
         loss = [(ye - y)*(ye - y) for ye, y in zip(y_est, y)]
         total_loss = Value(0.0)
         for l in loss:
             total_loss += l
         avg_loss = total_loss * (1/len(loss)) # our autograd doesn't support division
+
+        # back-propagation
         a.grad = 0.0
         b.grad = 0.0
         avg_loss.backward()
-
-        if i % 100 == 0:
-            print(f"{i=}, {a=}, {b=}, {avg_loss=}")
         
+        # gradient descent
         lr = 0.01
         a.data -= lr * a.grad
         b.data -= lr * b.grad
+
+        if i % 100 == 0:
+            print(f"{i=}, {a=}, {b=}, {avg_loss=}")
 
     print(f"Final a: {a.data}, b: {b.data}")
     assert abs(a.data - a0) < 1e-5
@@ -71,3 +76,7 @@ if __name__ == "__main__":
     test_arithmetic()
     test_linear_regression()
     print("All tests passed")
+
+# RUN:
+# cd simple-llm
+# python -m autograd.test
