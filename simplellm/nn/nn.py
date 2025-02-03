@@ -1,4 +1,4 @@
-# Our Implementation of Neural Network
+# Various implementation of a simple multi-layer perceptron neural network
 
 import random
 import math
@@ -188,7 +188,7 @@ def train_auto_grad_model_adam(X: np.ndarray, Y: np.ndarray, model: AutoGradMLP,
 
             total_loss += batch_total_loss.data
 
-        if (epoch+1) % 10 == 0:
+        if (epoch+1) % 1 == 0:
             print(f'{datetime.datetime.now().strftime("%d/%m/%Y, %H:%M:%S")} Epoch [{epoch+1}/{epochs}], Loss: {total_loss/total_samples:.4f}')
     
     return model

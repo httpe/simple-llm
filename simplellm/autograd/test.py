@@ -1,3 +1,6 @@
+# Test script for the autograd implementation
+# Test by running: python -m simplellm.autograd.test
+
 import torch
 from .autograd import Value
 import numpy as np
@@ -77,5 +80,3 @@ if __name__ == "__main__":
     test_linear_regression()
     print("All tests passed")
 
-# RUN:
-# python -m simplellm.autograd.test
