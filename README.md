@@ -33,8 +33,9 @@ Goal: Implement character level language model using PyTorch with the following 
 1. Bi-gram model
 2. N-gram model by neural network
 3. Transformer model
+4. Minimal Neural Network model that can be trained to fit the ground truth distribution
 
-Testing: General word samples from some regex rules as training/testing dataset. Test if these models are able to learn the regex patterns and generate legal out-sample words.
+Testing: General text samples from some simple rules that can be easily verified. Use those samples as training/testing dataset and test if these models are able to learn the patterns and generate legal out-sample text.
 
 Status: **Ongoing**
 
