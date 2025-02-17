@@ -5,7 +5,7 @@ import random
 import numpy as np
 import torch
 
-from .lm import BiGramModel, TriGramModel, TensorBiGramModel, NeuralNGramModel, train_torch_lm_model, prepare_torch_dataset, sample_torch_lm_model, CharacterTokenizer
+from .lm import BiGramModel, TriGramModel, TensorBiGramModel, NeuralNGramModel, train_torch_lm_model, prepare_torch_dataset, sample_torch_lm_model
 from . import llm_samples
 from . import sticky
 
@@ -29,15 +29,6 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     assert all([sticky.validate_samples(stickiness, ground_true_samples)])
     print("")
 
-    # baseline model, simply generate random characters from [A-Za-z0-9]
-    print("Baseline model (random [A-Za-z0-0]):")
-    baseline_model = sticky.BaselineModel()
-    baseline_samples = baseline_model.generate(n_samples=n_to_generate, max_length=max_len)
-    print("Samples generated:")
-    print(baseline_samples[:10])
-    sticky.validate_samples(stickiness, baseline_samples, ground_true_samples)
-    print("")
-
     # validate samples generated from LLMs
     print('--------------------------------------')
     print("")
@@ -51,6 +42,15 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     print('--------------------------------------')
     print("")
 
+    # baseline model, simply generate random characters from [A-Za-z0-9]
+    print("Baseline model (random [A-Za-z0-0]):")
+    baseline_model = sticky.BaselineModel()
+    baseline_samples = baseline_model.generate(n_samples=n_to_generate, max_length=max_len)
+    print("Samples generated:")
+    print(baseline_samples[:10])
+    sticky.validate_samples(stickiness, baseline_samples, ground_true_samples)
+    print("")
+
     # train a tri-gram model, this should have 100% accuracy given the stickiness is 1
     print("Naive Counting-based Tri-gram model:")
     model = TriGramModel(sample_sep=".", dummy_count=0)
@@ -62,7 +62,6 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     sticky.validate_samples(stickiness, generated_samples, ground_true_samples)
     print("")
 
-
     # train a bi-gram model to approximate the tri-gram model
     print("Naive Counting-based Bi-gram model:")
     model = BiGramModel(sample_sep=".", dummy_count=0)
@@ -73,7 +72,6 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     print(generated_samples[:10])
     sticky.validate_samples(stickiness, generated_samples, ground_true_samples)
     print("")
-
 
     # test neural network based bi-gram model, it should be able to approximate the counting-based bi-gram model
     print("Tensor Bi-gram model:")

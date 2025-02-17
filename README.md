@@ -30,12 +30,19 @@ Status: **Done** (see `nn/`)
 
 Goal: Implement character level language model using PyTorch with the following methods:
 
-1. Bi-gram model
+1. Counting based Bi-gram and Tri-gram models
 2. N-gram model by neural network
-3. Transformer model
-4. Minimal Neural Network model that can be trained to fit the ground truth distribution
+3. Recurrent neural network (RNN) model
+4. Transformer model
 
-Testing: General text samples from some simple rules that can be easily verified. Use those samples as training/testing dataset and test if these models are able to learn the patterns and generate legal out-sample text.
+Testing:
+
+1. Propose a rule-based sample generation algorithm, such that:
+   1. It can generate an arbitrary large amount of samples
+   2. It is easy to verify if a particular sample is within the distribution / satisfy all the constraints
+   3. We can easily adjust the context length required to learn the full distribution, e.g. even in theory, we need least a N-gram model is capture all the constraints set forth by the rule, where N is adjustable
+2. Generate samples from the distribution and train various models listed above, plus feed into mainstream LLMs
+3. Generate new samples from the trained models (or prompted LLMs) and test how many of them can pass the validation (i.e. are in distribution)
+4. Understand how these models actually learned the distribution by looking into the trained parameters
 
 Status: **Ongoing**
-
