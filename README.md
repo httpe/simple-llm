@@ -1,48 +1,57 @@
 # Simple LLM
 
-Simple LLM is a project to build a GPT-like LLM from scratch.
+Simple LLM is a project implementing a GPT-like Large Language Model (LLM) from scratch.
 
-The key reference material is Andrej Karpathy's [Neural Networks: Zero to Hero](https://www.youtube.com/playlist?list=PLAqhIrjkxbuWI23v9cThsA9GvCAUhRvKZ) video series.
+This implementation follows Andrej Karpathy's [Neural Networks: Zero to Hero](https://www.youtube.com/playlist?list=PLAqhIrjkxbuWI23v9cThsA9GvCAUhRvKZ) video series as a primary reference.
 
 ## Milestones
 
 ### Automatic Differentiation
 
-Goal: Build an automatic differentiation library with back propagation. It should support operations: +, *, relu, such that we can build neural net on top of it.
+Goal: Implement an automatic differentiation library with back-propagation support. The library includes fundamental operations (+, *, ReLU) as building blocks for neural network construction.
 
-Testing: Fit a linear regression `y = a*x + b` on a noiseless dataset with MSE loss. Compare the results of our library with ground truth and that fit by Pytorch.
+Validation: Implementation tested through a linear regression (`y = a*x + b`) on a noiseless dataset using MSE loss. Results validated against ground truth and PyTorch implementation.
 
-Status: **Done** (see `autograd/`)
+Status: **Complete** (see `simplellm/autograd/`)
 
 ### Neural Network (Multi-layer Perceptron)
 
-Goal: Implement neural network (MLP) and training algorithm for:
+Goal: Implement neural network (MLP) and training algorithms in steps, gradually replace our implementation to that of PyTorch's:
 
-1. Our automatic differentiation library (implement SGD/Adam)
-2. PyTorch tensor (implement SGD/Adam)
-3. PyTorch NN module (Pytorch Adam)
+1. Our automatic differentiation library from last stage + our SGD/Adam optimizers
+2. PyTorch tensors + our SGD/Adam optimizers written in Pytorch
+3. PyTorch NN modules + PyTorch's Adam optimizer
 
-Testing: Fit a quadratic regression `y = w1*x1**2 + w2*x2**2 + b` on a noiseless dataset with MSE loss. Use ReLU as activation function. Compare the loss from the training with the above 3 implementations and SGD vs Adam.
+Validation: Implementations tested through quadratic regression (`y = w1*x1**2 + w2*x2**2 + b`) on a noiseless dataset using MSE loss and ReLU activation. Performance compared across all three implementations, with additional comparison between SGD and Adam optimizers.
 
-Status: **Done** (see `nn/`)
+Status: **Complete** (see `simplellm/nn/`)
 
 ### Language Modeling
 
-Goal: Implement character level language model using PyTorch with the following methods:
+Goal: Implement and compare various character-level language models using PyTorch.
 
-1. Counting based Bi-gram and Tri-gram models
-2. N-gram model by neural network
-3. Recurrent neural network (RNN) model
-4. Transformer model
+Model implementations:
 
-Testing:
+1. Statistical n-gram models
+   1. Bi-gram and tri-gram models with counting-based approach
+   2. Bi-gram model optimized through cross-entropy loss and gradient descent
+2. Neural architectures
+   1. N-gram model with character-level embeddings and dense MLP
+   2. Recurrent Neural Network (RNN)
+   3. Transformer architecture
 
-1. Propose a rule-based sample generation algorithm, such that:
-   1. It can generate an arbitrary large amount of samples
-   2. It is easy to verify if a particular sample is within the distribution / satisfy all the constraints
-   3. We can easily adjust the context length required to learn the full distribution, e.g. even in theory, we need least a N-gram model is capture all the constraints set forth by the rule, where N is adjustable
-2. Generate samples from the distribution and train various models listed above, plus feed into mainstream LLMs
-3. Generate new samples from the trained models (or prompted LLMs) and test how many of them can pass the validation (i.e. are in distribution)
-4. Understand how these models actually learned the distribution by looking into the trained parameters
+The training data is synthesized with the following properties:
 
-Status: **Ongoing**
+1. Rule-based generation for interpretability
+2. Deterministic validation of distribution membership (Y/N) for any given sample
+3. Configurable context length requirements with parameter N
+   - N determines minimum n-gram model size required for 100% accuracy
+
+Evaluation:
+
+1. Train all implemented models on the synthetic dataset
+2. Generate novel samples from trained models and LLMs prompted with the training samples
+3. Validate generated samples against distribution rules and calculate in-distribution percentage
+4. Analyze learned parameters to understand how different architectures capture the underlying distribution
+
+Status: **In Progress**
