@@ -54,4 +54,4 @@ Evaluation:
 3. Validate generated samples against distribution rules and calculate in-distribution percentage
 4. Analyze learned parameters to understand how different architectures capture the underlying distribution
 
-Status: **In Progress**
+Status: **In Progress** (see `simplellm/lm/`)

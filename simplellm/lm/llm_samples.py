@@ -1658,24 +1658,33 @@ deepseek_r1_prompt2_samples = '''
 '''
 
 
+def parse_sample_text(sample_text: str) -> list[str]:
+    samples = sample_text.split("\n")
+    samples = [x.strip() for x in samples]
+    samples = [(x.split(' ')[1] if ' ' in x else x) for x in samples]
+    samples = [s for s in samples if len(s) > 0]
+    return samples
+
 # Test date: 2025-02-14
 llm_samples = {
-    "DeepSeek v3": deepseek_v3_samples,
-    "DeepSeek R1": deepseek_r1_samples,
-    "DeepSeek R1 prompt2": deepseek_r1_prompt2_samples,
+    "stickiness_1": {
+        "DeepSeek v3": parse_sample_text(deepseek_v3_samples),
+        "DeepSeek R1": parse_sample_text(deepseek_r1_samples),
+        "DeepSeek R1 prompt2": parse_sample_text(deepseek_r1_prompt2_samples),
 
-    "Chatgpt 4o mini": chatgpt_4o_mini_samples + '\n' + chatgpt_4o_mini_samples_1,
-    "Chatgpt o3 mini": chatgpt_o3_mini_samples,
+        "Chatgpt 4o mini": parse_sample_text(chatgpt_4o_mini_samples + '\n' + chatgpt_4o_mini_samples_1),
+        "Chatgpt o3 mini": parse_sample_text(chatgpt_o3_mini_samples),
 
-    "Gemini 2.0 Flash": gemini_2p0_flash_samples,
-    "Gemini 2.0 Flash Thinking": gemini_2p0_flash_thinking_samples,
+        "Gemini 2.0 Flash": parse_sample_text(gemini_2p0_flash_samples),
+        "Gemini 2.0 Flash Thinking": parse_sample_text(gemini_2p0_flash_thinking_samples),
 
-    "Claude 3 Opus": claude_3_opus_samples,
-    "Claude 3.5 Sonnet": claude_3p5_sonnet_samples,
+        "Claude 3 Opus": parse_sample_text(claude_3_opus_samples),
+        "Claude 3.5 Sonnet": parse_sample_text(claude_3p5_sonnet_samples),
 
-    "Grok": grok_samples,
-    
-    "qwen max 20250125": qwen_max_20250125_samples,
+        "Grok": parse_sample_text(grok_samples),
+        
+        "qwen max 20250125": parse_sample_text(qwen_max_20250125_samples),
 
-    "llama 3.1 nemotron 70b instruct": llama_3p1_nemotron_70b_instruct_samples,
+        "llama 3.1 nemotron 70b instruct": parse_sample_text(llama_3p1_nemotron_70b_instruct_samples),
+    }
 }

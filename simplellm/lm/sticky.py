@@ -107,28 +107,6 @@ def validate_one_sample(stickiness: int, sample: str) -> bool:
 
     return True
 
-def validate_samples(stickiness: int, samples: list[str], existing_samples: list[str]| None = None):
-    n_total = len(samples)
-    unique_samples = list(set(samples))
-    n_unique = len(unique_samples)
-    if existing_samples is None:
-        existing_samples = []
-    new_samples = [s for s in unique_samples if s not in existing_samples]
-    n_new = len(new_samples)
-
-    n_valid = 0
-    valid_flags = []
-    for sample in new_samples:
-        valid = validate_one_sample(stickiness, sample)
-        valid_flags.append(valid)
-        if valid:
-            n_valid += 1
-        # print(f"{sample}: {valid}")
-    
-    print(f"Valid/New/Unique/Total: {n_valid}/{n_new}/{n_unique}/{n_total}; Accuracy (Valid/New) %: {100 * n_valid/n_new: 0.2f}%")
-
-    return valid_flags
-
 
 
 ##############################################
