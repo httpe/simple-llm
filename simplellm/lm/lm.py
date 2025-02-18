@@ -125,7 +125,7 @@ class TriGramModel:
 
 
 #############################################################
-## Neural N-gram Model
+## Neural Network Model
 #############################################################
 
 class TensorBiGramModel(nn.Module):
@@ -147,9 +147,9 @@ class TensorBiGramModel(nn.Module):
         return bi_gram_logits
 
 
-class NeuralNGramModel(nn.Module):
-    def __init__(self, vocab_size: int, embed_size: int, look_back: int, hidden_sizes: list[int], output_bias=True):
-        super(NeuralNGramModel, self).__init__()
+class MLPLanguageModel(nn.Module):
+    def __init__(self, vocab_size: int, embed_size: int, look_back: int, hidden_sizes: list[int]):
+        super(MLPLanguageModel, self).__init__()
 
         # for N-gram model, we need to look back n_gram - 1 characters
         self.look_back = look_back
@@ -171,7 +171,7 @@ class NeuralNGramModel(nn.Module):
             output_layer_input_size = self.look_back * embed_size
         else:
             output_layer_input_size = hidden_sizes[-1]
-        layers.append(nn.Linear(output_layer_input_size, self.vocab_size, bias=output_bias))
+        layers.append(nn.Linear(output_layer_input_size, self.vocab_size))
 
         self.layers = layers
         self.layers_stack = nn.Sequential(*layers)
@@ -186,56 +186,128 @@ class NeuralNGramModel(nn.Module):
 
         return nn_output_logits
 
+class RNNCell(nn.Module):
+    def __init__(self, input_size: int, hidden_state_size: int):
+        super(RNNCell, self).__init__()
+
+        self.input_size = input_size
+        self.hidden_state_size = hidden_state_size
+
+        self.linear = nn.Linear(input_size + hidden_state_size, hidden_state_size)
+
+    def forward(self, x: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
+        # x: (batch_size, input_size)
+        # h: (batch_size, hidden_state_size)
+        combined = torch.cat([x, h], dim=1) # (batch_size, input_size + hidden_state_size)
+        pre_activation = self.linear(combined) # (batch_size, hidden_state_size)
+        hidden = torch.tanh(pre_activation) # (batch_size, hidden_state_size)
+        return hidden
+
+class RNNModel(nn.Module):
+    def __init__(self, vocab_size: int, embed_size: int, hidden_state_size: int):
+        super(RNNModel, self).__init__()
+
+        self.vocab_size = vocab_size
+        self.embed_size = embed_size
+        self.hidden_state_size = hidden_state_size
+
+        self.embed = nn.Embedding(vocab_size, embed_size)
+        self.rnn_cell = RNNCell(embed_size, hidden_state_size)
+        self.output_layer = nn.Linear(hidden_state_size, vocab_size)
+
+        # register the hidden state as a parameter
+        self.init_hidden = nn.Parameter(torch.zeros(1, hidden_state_size))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch_size, max_series_length), int tensor between 0 and vocab_size - 1
+        embed = self.embed(x) # (batch_size, max_series_length, embed_size)
+
+        batch_size = embed.size(0)
+        max_series_length = embed.size(1)
+
+        # initialize hidden state
+        hidden = self.init_hidden.expand(batch_size, -1) # (batch_size, hidden_state_size)
+        
+        # iterate over the series for each time step to get the hidden states
+        hidden_state_series = []
+        for t in range(max_series_length):
+            embed_t = embed[:, t, :] # (batch_size, embed_size)
+            hidden = self.rnn_cell(embed_t, hidden) # (batch_size, hidden_state_size)
+            hidden_state_series.append(hidden)
+        
+        # convert the hidden states to logits
+        hidden_states = torch.stack(hidden_state_series, dim=1) # (batch_size, max_series_length, hidden_state_size)
+        output_logits = self.output_layer(hidden_states) # (batch_size, max_series_length, vocab_size)
+
+        return output_logits
+        
+    def step(self, x: torch.Tensor, hidden: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+        # x: (batch_size,), int tensor between 0 and vocab_size - 1
+        # hidden: (batch_size, hidden_state_size)
+        if hidden is None:
+            hidden = self.init_hidden.expand(x.size(0), -1)
+        embed = self.embed(x) # (batch_size, embed_size)
+        hidden_next = self.rnn_cell(embed, hidden) # (batch_size, hidden_state_size)
+        logits = self.output_layer(hidden_next) # (batch_size, vocab_size)
+        return logits, hidden_next
+
+
+
 #############################################################
 ## Tokenization
 #############################################################
 
 class CharacterTokenizer:
-    def __init__(self, sample_sep: str = ".") -> None:
-        self.sample_sep = sample_sep
-        self.c2i = {self.sample_sep: 0}
-        self.i2c = {0: self.sample_sep}
+    def __init__(self) -> None:
+        self.start_sym = "."
+        self.end_sym = "+"
+        self.pad_sym = " "
+        self.start_token = 1
+        self.end_token = 2
+        self.pad_token = 0
+        self.c2i = {self.start_sym: self.start_token, self.end_sym: self.end_token, self.pad_sym: self.pad_token}
+        self.i2c = {self.start_token: self.start_sym, self.end_token: self.end_sym, self.pad_token: self.pad_sym}
 
     def train(self, samples: list[str]):
         # build the character set
         # KEY IDEA: naive tokenization, we do per character tokenization
         vocabulary = sorted(set("".join(samples)))
-        assert self.sample_sep not in vocabulary
+        assert self.start_sym not in vocabulary
+        assert self.end_sym not in vocabulary
+        assert self.pad_sym not in vocabulary
+        next_token_idx = max(self.i2c.keys()) + 1
         for c in vocabulary:
             if c in self.c2i:
                 continue
-            self.c2i[c] = len(self.c2i)
+            self.c2i[c] = next_token_idx
+            next_token_idx += 1
         
         self.i2c = {i: c for c, i in self.c2i.items()}
 
-    def tokenize(self, sample: str) -> list[int]:
-        return [self.c2i[c] for c in sample]
+    def encode(self, sample: str) -> list[int]:
+        tokens = [self.c2i[c] for c in sample]
+        return tokens
+    def decode(self, tokens: list[int]) -> str:
+        chars = [self.i2c[i] for i in tokens]
+        return "".join(chars)
 
     @property
     def vocab_size(self) -> int:
         return len(self.c2i)
-    
-    def char_to_token(self, char: str) -> int:
-        return self.c2i[char]
 
-    def token_to_char(self, token: int) -> str:
-        return self.i2c[token]
 
 #############################################################
 ## Neural Model Training
 #############################################################
 
-def prepare_torch_dataset(samples: list[str], look_back: int, sample_sep: str = ".") -> tuple[CharacterTokenizer, TensorDataset]:
-    # build the vocabulary
-    tokenizer = CharacterTokenizer(sample_sep)
-    tokenizer.train(samples)
-
+def prepare_n_gram_dataset(samples: list[str], tokenizer: CharacterTokenizer, look_back: int) -> TensorDataset:
     # convert samples to torch tensors
     X = []
     Y = []
     for sample in samples:
-        full_sample = sample_sep * look_back + sample + sample_sep
-        tokens = tokenizer.tokenize(full_sample)
+        tokens = tokenizer.encode(sample)
+        # pad to the left
+        tokens = [tokenizer.pad_token] * max(look_back - 1, 0) + [tokenizer.start_token] + tokens + [tokenizer.end_token]
         for i in range(look_back, len(tokens)):
             X.append(tokens[i-look_back:i])
             Y.append(tokens[i])
@@ -244,10 +316,33 @@ def prepare_torch_dataset(samples: list[str], look_back: int, sample_sep: str = 
     Y = torch.tensor(Y, dtype=torch.long)
     dataset = torch.utils.data.TensorDataset(X, Y)
 
-    return tokenizer, dataset
+    return dataset
 
+def prepare_auto_regressive_dataset(samples: list[str], tokenizer: CharacterTokenizer) -> TensorDataset:
+    max_len = max([len(sample) for sample in samples])
 
-def train_torch_lm_model(model: nn.Module, dataset: TensorDataset, batch_size=32, epochs=1000, learning_rate=0.01):
+    # convert samples to torch tensors
+    X = []
+    Y = []
+    for sample in samples:
+        sample_tokens = tokenizer.encode(sample)
+        x_tokens = [tokenizer.start_token] + sample_tokens + [tokenizer.end_token]
+        # pad to the right
+        x_tokens = x_tokens + [tokenizer.pad_token] * (max_len - (len(x_tokens) - 2))
+        # print(f"tokens: {tokens}, decode: {tokenizer.decode(tokens)}")
+        # Y tokens are shifted right by one
+        y_tokens = x_tokens[1:] + [tokenizer.pad_token]
+        X.append(x_tokens)
+        Y.append(y_tokens)
+
+    X = torch.tensor(X, dtype=torch.long)
+    Y = torch.tensor(Y, dtype=torch.long)
+    
+    dataset = torch.utils.data.TensorDataset(X, Y)
+
+    return dataset
+
+def train_torch_n_gram_model(model: nn.Module, dataset: TensorDataset, batch_size=32, epochs=1000, learning_rate=0.01):
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     total_samples = len(dataloader.dataset) # type: ignore
@@ -282,12 +377,46 @@ def train_torch_lm_model(model: nn.Module, dataset: TensorDataset, batch_size=32
     return model
 
 
-def sample_torch_lm_model(model: nn.Module, tokenizer: CharacterTokenizer, look_back: int, n_samples: int = 10, max_length: int = 100, sample_sep: str = ".") -> list[str]:
+def train_auto_regressive_model(model: RNNModel, dataset: TensorDataset, batch_size=32, epochs=1000, learning_rate=0.01, ignore_token=0) -> RNNModel:
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    total_samples = len(dataloader.dataset) # type: ignore
+    
+    # Initialize model, loss function, and optimizer
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=ignore_token)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    
+    # Training loop
+    for epoch in range(epochs):
+        total_loss = 0
+
+        for X_batch, Y_batch in dataloader: # X_batch: (batch_size, max_series_length)
+            batch_size = X_batch.shape[0]
+
+            # Forward pass
+            outputs = model(X_batch) # (batch_size, max_series_length, vocab_size)
+            # Y_batch: (batch_size, max_series_length)
+            loss = criterion(outputs.view(-1, model.vocab_size), Y_batch.view(-1))
+
+            # Backward pass and optimize
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item() * batch_size
+
+        if (epoch+1) % 10 == 0:
+            print(f'{datetime.datetime.now().strftime("%d/%m/%Y, %H:%M:%S")} Epoch [{epoch+1}/{epochs}], Loss: {total_loss/total_samples:.4f}')
+    
+    return model
+
+
+def sample_torch_n_gram_model(model: nn.Module, tokenizer: CharacterTokenizer, look_back: int, n_samples: int = 10, max_length: int = 100) -> list[str]:
     samples: list[str] = []
 
     for _ in range(n_samples):
-        current_tokens = [tokenizer.char_to_token(sample_sep)] * look_back
-        generated_text = ""
+        current_tokens = [tokenizer.pad_token] * max(0, look_back - 1) + [tokenizer.start_token]
+        generated_tokens = []
 
         for _ in range(max_length):
             current_tokens_tensor = torch.tensor(current_tokens, dtype=torch.long).unsqueeze(0) # (1, look_back)
@@ -297,15 +426,43 @@ def sample_torch_lm_model(model: nn.Module, tokenizer: CharacterTokenizer, look_
 
             # randomly pick one token out based on the logits distribution
             next_token = int(torch.multinomial(torch.softmax(logits[0], dim=0), 1).item())
-            next_char = tokenizer.token_to_char(next_token)
-
-            if next_char == sample_sep:
+            
+            if next_token == tokenizer.end_token:
                 break
 
-            generated_text += next_char
+            generated_tokens.append(next_token)
             current_tokens = current_tokens[1:] + [next_token]
         
+        generated_text = tokenizer.decode(generated_tokens)
         samples.append(generated_text)
 
     return samples
 
+
+def sample_auto_regressive_model(model: RNNModel, tokenizer: CharacterTokenizer, n_samples: int = 10, max_length: int = 100) -> list[str]:
+    samples: list[str] = []
+
+    with torch.no_grad():
+        for _ in range(n_samples):
+            # initialize the generated series with the input series
+            tokens = [tokenizer.start_token]
+            hidden = None
+
+            for t in range(max_length):
+                current_token = torch.tensor(tokens[t]).unsqueeze(0) # (1,)
+                logits, hidden = model.step(current_token, hidden) # logits: (1, vocab_size), hidden: (1, hidden_state_size)
+
+                next_token = int(torch.multinomial(torch.softmax(logits[0], dim=0), 1).item()) 
+
+                if next_token == tokenizer.end_token:
+                    break
+                
+                tokens.append(next_token)
+            
+            # remove the starting token
+            tokens = tokens[1:]
+
+            generated_text = tokenizer.decode(tokens)
+            samples.append(generated_text)
+
+    return samples

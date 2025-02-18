@@ -2,11 +2,12 @@
 
 from typing import Callable
 import random
+import string
 
 import numpy as np
 import torch
 
-from .lm import BiGramModel, TriGramModel, TensorBiGramModel, NeuralNGramModel, train_torch_lm_model, prepare_torch_dataset, sample_torch_lm_model
+from .lm import BiGramModel, TriGramModel, TensorBiGramModel, MLPLanguageModel, RNNModel, CharacterTokenizer, prepare_n_gram_dataset, prepare_auto_regressive_dataset, train_torch_n_gram_model, train_auto_regressive_model, sample_torch_n_gram_model, sample_auto_regressive_model
 from .llm_samples import llm_samples
 from . import sticky
 
@@ -81,17 +82,24 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     validate_samples(validator, generated_samples, ground_true_samples)
 
 
+    # use tokenizer for neural network based models
+    tokenizer = CharacterTokenizer()
+    # a-z A-Z 0-9
+    token_samples = [string.ascii_lowercase + string.ascii_uppercase + string.digits]
+    tokenizer.train(token_samples)
+
+
     # test neural network based bi-gram model, it should be able to approximate the counting-based bi-gram model
     print("Tensor bi-gram model (train with cross-entropy loss and gradient descent):")
     look_back = 1
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
-    tokenizer, dataset = prepare_torch_dataset(ground_true_samples, look_back=look_back)
+    dataset = prepare_n_gram_dataset(ground_true_samples, tokenizer, look_back=look_back)
     model = TensorBiGramModel(vocab_size=tokenizer.vocab_size)
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    model = train_torch_lm_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
-    generated_samples = sample_torch_lm_model(model, tokenizer, look_back=look_back, n_samples=n_to_generate, max_length=max_len)
+    model = train_torch_n_gram_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
+    generated_samples = sample_torch_n_gram_model(model, tokenizer, look_back=look_back, n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, ground_true_samples)
 
 
@@ -103,13 +111,27 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     embed_size = 8
     hidden_layer_sizes = [8]
     print(f"Neural language model with {look_back} characters context:")
-    tokenizer, dataset = prepare_torch_dataset(ground_true_samples, look_back=look_back)
-    model = NeuralNGramModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
+    dataset = prepare_n_gram_dataset(ground_true_samples, tokenizer, look_back=look_back)
+    model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    model = train_torch_lm_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
-    generated_samples = sample_torch_lm_model(model, tokenizer, look_back=look_back, n_samples=n_to_generate, max_length=max_len)
+    model = train_torch_n_gram_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
+    generated_samples = sample_torch_n_gram_model(model, tokenizer, look_back=look_back, n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, ground_true_samples)
 
+
+    # train a RNN model
+    embed_size = 8
+    hidden_state_size = 8
+    epoch = 100
+    learning_rate = 0.01
+    batch_size = 32
+    dataset = prepare_auto_regressive_dataset(ground_true_samples, tokenizer)
+    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size)
+    print("RNN model:")
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    model = train_auto_regressive_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+    generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=max_len)
+    validate_samples(validator, generated_samples, ground_true_samples)
 
 
 if __name__ == "__main__":
