@@ -243,7 +243,7 @@ class RNNModel(nn.Module):
         
     def step(self, x: torch.Tensor, hidden_prev: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
         # x: (batch_size,), int tensor between 0 and vocab_size - 1
-        # hidhidden_prevden: (batch_size, hidden_state_size)
+        # hidden_prev: (batch_size, hidden_state_size)
         if hidden_prev is None:
             hidden_prev = self.init_hidden.expand(x.size(0), -1)
         embed = self.embed(x) # (batch_size, embed_size)
