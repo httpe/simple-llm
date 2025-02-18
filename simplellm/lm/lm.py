@@ -241,15 +241,15 @@ class RNNModel(nn.Module):
 
         return output_logits
         
-    def step(self, x: torch.Tensor, hidden: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+    def step(self, x: torch.Tensor, hidden_prev: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
         # x: (batch_size,), int tensor between 0 and vocab_size - 1
-        # hidden: (batch_size, hidden_state_size)
-        if hidden is None:
-            hidden = self.init_hidden.expand(x.size(0), -1)
+        # hidhidden_prevden: (batch_size, hidden_state_size)
+        if hidden_prev is None:
+            hidden_prev = self.init_hidden.expand(x.size(0), -1)
         embed = self.embed(x) # (batch_size, embed_size)
-        hidden_next = self.rnn_cell(embed, hidden) # (batch_size, hidden_state_size)
-        logits = self.output_layer(hidden_next) # (batch_size, vocab_size)
-        return logits, hidden_next
+        hidden = self.rnn_cell(embed, hidden_prev) # (batch_size, hidden_state_size)
+        logits = self.output_layer(hidden) # (batch_size, vocab_size)
+        return logits, hidden
 
 
 
