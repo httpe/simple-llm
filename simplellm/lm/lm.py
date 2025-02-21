@@ -203,8 +203,31 @@ class RNNCell(nn.Module):
         hidden = torch.tanh(pre_activation) # (batch_size, hidden_state_size)
         return hidden
 
+class GRUCell(nn.Module):
+    def __init__(self, input_size: int, hidden_state_size: int):
+        super(GRUCell, self).__init__()
+
+        self.input_size = input_size
+        self.hidden_state_size = hidden_state_size
+
+        self.linear_z = nn.Linear(input_size + hidden_state_size, hidden_state_size)
+        self.linear_r = nn.Linear(input_size + hidden_state_size, hidden_state_size)
+        self.linear_h = nn.Linear(input_size + hidden_state_size, hidden_state_size)
+
+    def forward(self, x: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
+        # x: (batch_size, input_size)
+        # h: (batch_size, hidden_state_size)
+        combined = torch.cat([x, h], dim=1) # (batch_size, input_size + hidden_state_size)
+        z = torch.sigmoid(self.linear_z(combined)) # (batch_size, hidden_state_size)
+        r = torch.sigmoid(self.linear_r(combined)) # (batch_size, hidden_state_size)
+        h_masked = r * h # (batch_size, hidden_state_size)
+        combined_masked = torch.cat([x, h_masked], dim=1) # (batch_size, input_size + hidden_state_size)
+        h_hat = torch.tanh(self.linear_h(combined_masked)) # (batch_size, hidden_state_size)
+        hidden = (1 - z) * h + z * h_hat # (batch_size, hidden_state_size)
+        return hidden
+
 class RNNModel(nn.Module):
-    def __init__(self, vocab_size: int, embed_size: int, hidden_state_size: int):
+    def __init__(self, vocab_size: int, embed_size: int, hidden_state_size: int, use_gru: bool):
         super(RNNModel, self).__init__()
 
         self.vocab_size = vocab_size
@@ -212,7 +235,10 @@ class RNNModel(nn.Module):
         self.hidden_state_size = hidden_state_size
 
         self.embed = nn.Embedding(vocab_size, embed_size)
-        self.rnn_cell = RNNCell(embed_size, hidden_state_size)
+        if use_gru:
+            self.rnn_cell = GRUCell(embed_size, hidden_state_size)
+        else:
+            self.rnn_cell = RNNCell(embed_size, hidden_state_size)
         self.output_layer = nn.Linear(hidden_state_size, vocab_size)
 
         # register the hidden state as a parameter

@@ -3,13 +3,16 @@
 from typing import Callable
 import random
 import string
+import os
 
 import numpy as np
 import torch
 
-from .lm import BiGramModel, TriGramModel, TensorBiGramModel, MLPLanguageModel, RNNModel, CharacterTokenizer, prepare_n_gram_dataset, prepare_auto_regressive_dataset, train_torch_n_gram_model, train_auto_regressive_model, sample_torch_n_gram_model, sample_auto_regressive_model
+from .lm import BiGramModel, TriGramModel, TensorBiGramModel, MLPLanguageModel, RNNModel, TensorDataset, CharacterTokenizer, prepare_n_gram_dataset, prepare_auto_regressive_dataset, train_torch_n_gram_model, train_auto_regressive_model, sample_torch_n_gram_model, sample_auto_regressive_model
 from .llm_samples import llm_samples
 from . import sticky
+
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
 def reset_seeds():
     random.seed(0)
@@ -44,7 +47,7 @@ def validate_samples(validator: Callable[[str], bool], samples: list[str], exist
 
     return valid_flags
 
-def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len: int, stickiness: int):
+def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len: int, stickiness: int, use_saved_model: bool):
     # validator
     validator = lambda x: sticky.validate_one_sample(stickiness, x)
 
@@ -64,23 +67,22 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     validate_samples(validator, baseline_samples, ground_true_samples, model_name="Baseline (random [A-Za-z0-0])")
 
 
-    # train a tri-gram model, this should have 100% accuracy given the stickiness is 1
-    print("Counting-based tri-gram model:")
-    model = TriGramModel(sample_sep=".", dummy_count=0)
+   # train a bi-gram model to approximate the tri-gram model
+    model = BiGramModel(sample_sep=".", dummy_count=0)    
     model.train(ground_true_samples)
-    print("Parameter count: ", model.trigram_count.numel())
-    generated_samples = model.generate(n_samples=n_to_generate, max_length=max_len)
-    validate_samples(validator, generated_samples, ground_true_samples)
-    
-
-    # train a bi-gram model to approximate the tri-gram model
     print("Counting-based bi-gram model:")
-    model = BiGramModel(sample_sep=".", dummy_count=0)
-    model.train(ground_true_samples)
     print("Parameter count: ", model.bigram_count.numel())
     generated_samples = model.generate(n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, ground_true_samples)
 
+    # train a tri-gram model, this should have 100% accuracy given the stickiness is 1
+    model = TriGramModel(sample_sep=".", dummy_count=0)
+    model.train(ground_true_samples)
+    print("Counting-based tri-gram model:")
+    print("Parameter count: ", model.trigram_count.numel())
+    generated_samples = model.generate(n_samples=n_to_generate, max_length=max_len)
+    validate_samples(validator, generated_samples, ground_true_samples)
+    
 
     # use tokenizer for neural network based models
     tokenizer = CharacterTokenizer()
@@ -90,49 +92,111 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
 
 
     # test neural network based bi-gram model, it should be able to approximate the counting-based bi-gram model
-    print("Tensor bi-gram model (train with cross-entropy loss and gradient descent):")
     look_back = 1
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
     dataset = prepare_n_gram_dataset(ground_true_samples, tokenizer, look_back=look_back)
     model = TensorBiGramModel(vocab_size=tokenizer.vocab_size)
+    print("Tensor bi-gram model (train with cross-entropy loss and gradient descent):")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    model = train_torch_n_gram_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
+    path = os.path.join(SCRIPT_DIR, "tensor_bigram.pt")
+    if use_saved_model and os.path.exists(path):
+        model.load_state_dict(torch.load(path, weights_only=True))
+    else:
+        model = train_torch_n_gram_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
+        torch.save(model.state_dict(), path)
     generated_samples = sample_torch_n_gram_model(model, tokenizer, look_back=look_back, n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, ground_true_samples)
 
 
-    # train a neural network based language model, it should be able to approximate the counting-based N-gram model with much less free parameters
-    look_back = stickiness + 1
+    # train a neural network (MLP) based language model
+    # it has insufficient context length (look back) to excel in performance
+    # but should still be able to approximate the counting-based (N-1)-gram model with less parameters
+    look_back = 1
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
     embed_size = 8
     hidden_layer_sizes = [8]
-    print(f"Neural language model with {look_back} characters context:")
     dataset = prepare_n_gram_dataset(ground_true_samples, tokenizer, look_back=look_back)
     model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
+    print(f"Neural language model with {look_back} characters context:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    model = train_torch_n_gram_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
+    path = os.path.join(SCRIPT_DIR, f"mlp_lm_look_back_{look_back}.pt")
+    if use_saved_model and os.path.exists(path):
+        model.load_state_dict(torch.load(path, weights_only=True))
+    else:
+        model = train_torch_n_gram_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
+        torch.save(model.state_dict(), path)
     generated_samples = sample_torch_n_gram_model(model, tokenizer, look_back=look_back, n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, ground_true_samples)
 
 
-    # train a RNN model
+    # train a neural network (MLP) based language model, it should be able to approximate the counting-based N-gram model with much less free parameters
+    look_back = 2
+    epoch = 100
+    learning_rate = 0.01
+    batch_size = 32
+    embed_size = 8
+    hidden_layer_sizes = [8]
+    dataset = prepare_n_gram_dataset(ground_true_samples, tokenizer, look_back=look_back)
+    model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
+    print(f"Neural language model with {look_back} characters context:")
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    path = os.path.join(SCRIPT_DIR, f"mlp_lm_look_back_{look_back}.pt")
+    if use_saved_model and os.path.exists(path):
+        model.load_state_dict(torch.load(path, weights_only=True))
+    else:
+        model = train_torch_n_gram_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
+        torch.save(model.state_dict(), path)
+    generated_samples = sample_torch_n_gram_model(model, tokenizer, look_back=look_back, n_samples=n_to_generate, max_length=max_len)
+    validate_samples(validator, generated_samples, ground_true_samples)
+
+
+    # Prepare dataset auto-regressive models
+    dataset = prepare_auto_regressive_dataset(ground_true_samples, tokenizer)
+
+
+    # train a RNN model with simple recurrent unit
     embed_size = 8
     hidden_state_size = 8
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
-    dataset = prepare_auto_regressive_dataset(ground_true_samples, tokenizer)
-    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size)
+    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=False)
     print("RNN model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    model = train_auto_regressive_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+    path = os.path.join(SCRIPT_DIR, "rnn.pt")
+    if use_saved_model and os.path.exists(path):
+        model.load_state_dict(torch.load(path, weights_only=True))
+    else:
+        model = train_auto_regressive_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+        torch.save(model.state_dict(), path)
     generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, ground_true_samples)
 
+
+    # train a RNN model with GRU (Gated Recurrent Unit) unit
+    # reduced embedding/hidden size to match the RNN model parameter count
+    embed_size = 7 
+    hidden_state_size = 7
+    epoch = 100
+    learning_rate = 0.01
+    batch_size = 32
+    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=True)
+    print("GRU model:")
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    path = os.path.join(SCRIPT_DIR, "gru.pt")
+    if use_saved_model and os.path.exists(path):
+        model.load_state_dict(torch.load(path, weights_only=True))
+    else:
+        model = train_auto_regressive_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+        torch.save(model.state_dict(), path)
+    generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=max_len)
+    validate_samples(validator, generated_samples, ground_true_samples)
+
+        
 
 if __name__ == "__main__":
     # general parameters
@@ -140,10 +204,11 @@ if __name__ == "__main__":
     n_to_generate = 1000
     min_len = 3
     max_len = 10
+    use_saved_model = True
     
     reset_seeds()
     
     print("")
-    test_sticky_rule(n_training, n_to_generate, min_len, max_len, stickiness=1)
+    test_sticky_rule(n_training, n_to_generate, min_len, max_len, stickiness=1, use_saved_model=use_saved_model)
 
     
