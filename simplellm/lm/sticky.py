@@ -18,7 +18,7 @@ def generate_single_sample(min_length: int, max_length: int, stickiness: int) ->
     stickiness:
         stickiness = 0: no stickiness, each character is independent
         stickiness = 1: each character class will last at least 2 times (unless the string is ended), e.g., aaAAAAA0
-        stickiness = N:each character class will last at least N+1 times
+        stickiness = N: each character class will last at least N+1 times
     '''
 
     assert 0 < min_length <= max_length

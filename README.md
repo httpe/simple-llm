@@ -37,7 +37,7 @@ Model implementations:
    2. Bi-gram model optimized through cross-entropy loss and gradient descent
 2. Neural architectures
    1. N-gram model with character-level embeddings and dense MLP
-   2. Recurrent Neural Network (RNN)
+   2. Recurrent Neural Network (Original RNN Cell, GRU cell)
    3. Transformer architecture
 
 The training data is synthesized with the following properties:
