@@ -33,12 +33,12 @@ Goal: Implement and compare various character-level language models using PyTorc
 Model implementations:
 
 1. Statistical n-gram models
-   1. Bi-gram and tri-gram models with counting-based approach
-   2. Bi-gram model optimized through cross-entropy loss and gradient descent
+   1. Bi-gram and tri-gram models with counting-based approach (implemented)
+   2. Bi-gram model optimized through cross-entropy loss and gradient descent (implemented)
 2. Neural architectures
-   1. N-gram model with character-level embeddings and dense MLP
-   2. Recurrent Neural Network (Original RNN Cell, GRU cell)
-   3. Transformer architecture
+   1. N-gram model with character-level embeddings and dense MLP (implemented)
+   2. Recurrent Neural Network (Original RNN Cell, GRU cell) (implemented)
+   3. Transformer architecture (implemented)
 
 The training data is synthesized with the following properties:
 
@@ -54,4 +54,4 @@ Evaluation:
 3. Validate generated samples against distribution rules and calculate in-distribution percentage
 4. Analyze learned parameters to understand how different architectures capture the underlying distribution
 
-Status: **In Progress** (RNN/GRN/Transformer implemented) (see `simplellm/lm/`)
+Status: **In Progress** (see `simplellm/lm/`)
