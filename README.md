@@ -4,6 +4,35 @@ Simple LLM is a project implementing a GPT-like Large Language Model (LLM) from 
 
 This implementation follows Andrej Karpathy's [Neural Networks: Zero to Hero](https://www.youtube.com/playlist?list=PLAqhIrjkxbuWI23v9cThsA9GvCAUhRvKZ) video series as a primary reference.
 
+## Getting Started
+
+To try out the milestone test scripts below, first create a Python virtual environment, and install the dependencies:
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -v --upgrade pip
+pip install -v -r requirements.txt
+```
+
+To test our own automated differentiation library:
+
+```bash
+python -m simplellm.autograd.test
+```
+
+To test our own neural network implementations:
+
+```bash
+python -m simplellm.nn.test
+```
+
+To test our language model implementations:
+
+```bash
+python -m simplellm.lm.test
+```
+
 ## Milestones
 
 ### Automatic Differentiation
