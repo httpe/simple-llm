@@ -68,6 +68,10 @@ Model implementations:
    1. N-gram model with character-level embeddings and dense MLP (implemented)
    2. Recurrent Neural Network (Original RNN Cell, GRU cell) (implemented)
    3. Transformer architecture (implemented)
+      1. Causal self attention
+      2. Multi-head attention
+      3. Layer normalization
+      4. Position encoding
 
 The training data is synthesized with the following properties:
 

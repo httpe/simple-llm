@@ -139,7 +139,7 @@ class TensorBiGramModel(nn.Module):
         # this will be trained into the bi-gram counting matrix
         self.embedding = nn.Embedding(self.vocab_size, self.vocab_size)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (batch_size, 1), int tensor between 0 and vocab_size - 1
         embed = self.embedding(x) # (batch_size, 1, vocab_size)
         
@@ -178,7 +178,7 @@ class MLPLanguageModel(nn.Module):
         self.layers = layers
         self.layers_stack = nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (batch_size, look_back), int tensor between 0 and vocab_size - 1
         embed = self.embedding(x) # (batch_size, look_back, embed_size)
 
