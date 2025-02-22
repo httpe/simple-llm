@@ -48,7 +48,7 @@ def validate_samples(validator: Callable[[str], bool], samples: list[str], exist
 
     return valid_flags
 
-def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min_len: int, max_len: int, stickiness: int, use_saved_model: bool):
+def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min_len: int, max_len: int, stickiness: int, use_saved_model: bool, model_save_dir: str = SCRIPT_DIR):
     # validator
     validator = lambda x: sticky.validate_one_sample(stickiness, x)
 
@@ -109,7 +109,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = TensorBiGramModel(vocab_size=tokenizer.vocab_size)
     print("Tensor bi-gram model (train with cross-entropy loss and gradient descent):")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    path = os.path.join(SCRIPT_DIR, "tensor_bigram.pt")
+    path = os.path.join(model_save_dir, "tensor_bigram.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
     else:
@@ -133,7 +133,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
     print(f"Neural language model with {look_back} characters context:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    path = os.path.join(SCRIPT_DIR, f"mlp_lm_look_back_{look_back}.pt")
+    path = os.path.join(model_save_dir, f"mlp_lm_look_back_{look_back}.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
     else:
@@ -155,7 +155,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
     print(f"Neural language model with {look_back} characters context:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    path = os.path.join(SCRIPT_DIR, f"mlp_lm_look_back_{look_back}.pt")
+    path = os.path.join(model_save_dir, f"mlp_lm_look_back_{look_back}.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
     else:
@@ -181,7 +181,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=False)
     print("RNN model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    path = os.path.join(SCRIPT_DIR, "rnn.pt")
+    path = os.path.join(model_save_dir, "rnn.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
     else:
@@ -202,7 +202,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=True)
     print("GRU model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    path = os.path.join(SCRIPT_DIR, "gru.pt")
+    path = os.path.join(model_save_dir, "gru.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
     else:
@@ -226,7 +226,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = GPTLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
     print("GPT model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    path = os.path.join(SCRIPT_DIR, "gpt.pt")
+    path = os.path.join(model_save_dir, "gpt.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
     else:
@@ -247,6 +247,8 @@ if __name__ == "__main__":
     reset_seeds()
     
     print("")
-    test_sticky_rule(n_training, n_validation, n_to_generate, min_len, max_len, stickiness=1, use_saved_model=use_saved_model)
+    stickiness = 1
+    model_dir = os.path.join(SCRIPT_DIR, "models", f"stickiness_{stickiness}")
+    test_sticky_rule(n_training, n_validation, n_to_generate, min_len, max_len, stickiness=1, use_saved_model=use_saved_model, model_save_dir=model_dir)
 
     
