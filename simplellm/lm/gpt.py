@@ -102,13 +102,29 @@ class MultiHeadAttention(nn.Module):
         out = self.proj(out) # (B,T,C)
         return out
 
+class LayerNorm(nn.Module):
+    def __init__(self, embed_size: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        # y = gamma * (x - mean) / (std + eps) + beta
+        self.gamma = nn.Parameter(torch.ones(embed_size))
+        self.beta = nn.Parameter(torch.zeros(embed_size))
+
+    def forward(self, x: torch.Tensor):
+        # x: (B, T, C)
+        mean = x.mean(dim=-1, keepdim=True) # (B, T, 1)
+        std = x.std(dim=-1, keepdim=True) # (B, T, 1)
+        x = (x - mean) / (std + self.eps) # (B, T, C)
+        x = self.gamma * x + self.beta # (B, T, C)
+        return x
+
 class TransformerBlock(nn.Module):
     def __init__(self, max_context_size: int, embed_size: int, n_heads: int, head_size: int | None, ff_hidden_size: int | None):
         super().__init__()
         self.attention = MultiHeadAttention(max_context_size, embed_size, n_heads, head_size)
-        self.norm1 = nn.LayerNorm(embed_size)
+        self.norm1 = LayerNorm(embed_size)
         self.feed_forward = FeedForward(embed_size, ff_hidden_size)
-        self.norm2 = nn.LayerNorm(embed_size)
+        self.norm2 = LayerNorm(embed_size)
 
     def forward(self, x: torch.Tensor):
         # x: (B, T, C)
@@ -130,7 +146,7 @@ class GPTLanguageModel(nn.Module):
         
         self.blocks = nn.Sequential(*[TransformerBlock(max_context_size, embed_size, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size) for _ in range(n_layer)])
         
-        self.norm = nn.LayerNorm(embed_size)
+        self.norm = LayerNorm(embed_size)
         self.lm_head = nn.Linear(embed_size, vocab_size) # (C, V)
 
         self.position_idx = nn.Buffer(torch.arange(max_context_size)) # (max(T),)
