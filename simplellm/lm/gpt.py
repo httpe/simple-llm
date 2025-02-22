@@ -221,10 +221,12 @@ def sample_from_gpt_model(model: GPTLanguageModel, tokenizer: CharacterTokenizer
     return generated_samples
 
 
-def train_gpt_model(model: GPTLanguageModel, dataset: TensorDataset, batch_size=32, epochs=1000, learning_rate=0.01, ignore_token=0) -> GPTLanguageModel:
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+def train_gpt_model(model: GPTLanguageModel, training_dataset: TensorDataset, batch_size=32, epochs=1000, learning_rate=0.01, ignore_token=0, validation_dataset: TensorDataset|None = None) -> GPTLanguageModel:
+    training = DataLoader(training_dataset, batch_size=batch_size, shuffle=True)
+    validation = None if validation_dataset is None else DataLoader(validation_dataset, batch_size=batch_size, shuffle=False)
 
-    total_samples = len(dataloader.dataset) # type: ignore
+    total_samples = len(training.dataset) # type: ignore
+    total_validation_samples = 0 if validation is None else len(validation.dataset) # type: ignore
     
     # Initialize model, loss function, and optimizer
     criterion = torch.nn.CrossEntropyLoss(ignore_index=ignore_token)
@@ -234,7 +236,7 @@ def train_gpt_model(model: GPTLanguageModel, dataset: TensorDataset, batch_size=
     for epoch in range(epochs):
         total_loss = 0
 
-        for X_batch, Y_batch in dataloader:
+        for X_batch, Y_batch in training:
             # X_batch: (B, max(T))
 
             # Forward pass
@@ -251,7 +253,18 @@ def train_gpt_model(model: GPTLanguageModel, dataset: TensorDataset, batch_size=
             total_loss += loss.item() * batch_size
 
         if (epoch+1) % 10 == 0:
-            print(f'{datetime.datetime.now().strftime("%d/%m/%Y, %H:%M:%S")} Epoch [{epoch+1}/{epochs}], Loss: {total_loss/total_samples:.4f}')
-    
+            if validation is None:
+                print(f'{datetime.datetime.now().strftime("%d/%m/%Y, %H:%M:%S")} Epoch [{epoch+1}/{epochs}], Training Loss: {total_loss/total_samples:.4f}')
+            else:
+                total_val_loss = 0
+                model.eval()
+                with torch.no_grad():
+                    for X_batch, Y_batch in validation:
+                        logits = model(X_batch)
+                        loss = criterion(logits.view(-1, logits.size(-1)), Y_batch.view(-1))
+                        total_val_loss += loss.item() * batch_size
+                model.train()
+                print(f'{datetime.datetime.now().strftime("%d/%m/%Y, %H:%M:%S")} Epoch [{epoch+1}/{epochs}], Training Loss: {total_loss/total_samples:.4f}, Validation Loss: {total_val_loss/total_validation_samples:.4f}')
+
     return model
 
