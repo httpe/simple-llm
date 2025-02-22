@@ -8,7 +8,8 @@ import os
 import numpy as np
 import torch
 
-from .lm import BiGramModel, TriGramModel, TensorBiGramModel, MLPLanguageModel, RNNModel, TensorDataset, CharacterTokenizer, prepare_n_gram_dataset, prepare_auto_regressive_dataset, train_torch_n_gram_model, train_auto_regressive_model, sample_torch_n_gram_model, sample_auto_regressive_model
+from .lm import BiGramModel, TriGramModel, TensorBiGramModel, MLPLanguageModel, RNNModel, CharacterTokenizer, prepare_n_gram_dataset, prepare_auto_regressive_dataset, train_torch_n_gram_model, train_auto_regressive_model, sample_torch_n_gram_model, sample_auto_regressive_model
+from .gpt import GPTLanguageModel, train_gpt_model, sample_from_gpt_model
 from .llm_samples import llm_samples
 from . import sticky
 
@@ -64,7 +65,7 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     # baseline model, simply generate random characters from [A-Za-z0-9]
     baseline_model = sticky.BaselineModel()
     baseline_samples = baseline_model.generate(n_samples=n_to_generate, max_length=max_len)
-    validate_samples(validator, baseline_samples, ground_true_samples, model_name="Baseline (random [A-Za-z0-0])")
+    validate_samples(validator, baseline_samples, ground_true_samples, model_name="Baseline (random [A-Za-z0-9])")
 
 
    # train a bi-gram model to approximate the tri-gram model
@@ -196,7 +197,28 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, ground_true_samples)
 
-        
+
+    # Train a transformer/GPT model
+    embed_size = 8
+    max_context_size = 12
+    n_layer = 1
+    n_heads = 1
+    head_size = embed_size
+    ff_hidden_size = 8
+    epoch = 100
+    learning_rate = 0.01
+    batch_size = 32
+    model = GPTLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
+    print("GPT model:")
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    path = os.path.join(SCRIPT_DIR, "gpt.pt")
+    if use_saved_model and os.path.exists(path):
+        model.load_state_dict(torch.load(path, weights_only=True))
+    else:
+        model = train_gpt_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+        torch.save(model.state_dict(), path)
+    generated_samples = sample_from_gpt_model(model, tokenizer, max_new_tokens=max_len, n_samples=n_to_generate)
+    validate_samples(validator, generated_samples, ground_true_samples)
 
 if __name__ == "__main__":
     # general parameters
