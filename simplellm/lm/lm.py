@@ -395,7 +395,7 @@ def train_auto_regressive_model(model: RNNModel, dataset: TensorDataset, batch_s
     
     return model
 
-
+@torch.no_grad()
 def sample_torch_n_gram_model(model: nn.Module, tokenizer: CharacterTokenizer, look_back: int, n_samples: int = 10, max_length: int = 100) -> list[str]:
     samples: list[str] = []
 
@@ -423,7 +423,7 @@ def sample_torch_n_gram_model(model: nn.Module, tokenizer: CharacterTokenizer, l
 
     return samples
 
-
+@torch.no_grad()
 def sample_auto_regressive_model(model: RNNModel, tokenizer: CharacterTokenizer, n_samples: int = 10, max_length: int = 100) -> list[str]:
     samples: list[str] = []
 

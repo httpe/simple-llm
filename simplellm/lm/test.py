@@ -53,6 +53,7 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     validator = lambda x: sticky.validate_one_sample(stickiness, x)
 
     # generate some samples from the ground truth model
+    reset_seeds()
     ground_true_samples = sticky.generate_samples(n_samples=n_training, min_length=min_len, max_length=max_len, stickiness=stickiness)
     assert all([validate_samples(validator, ground_true_samples, model_name="Ground truth")])
 
@@ -63,12 +64,14 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
             validate_samples(validator, samples, ground_true_samples, model_name=f"{name} (LLM)")
 
     # baseline model, simply generate random characters from [A-Za-z0-9]
+    reset_seeds()
     baseline_model = sticky.BaselineModel()
     baseline_samples = baseline_model.generate(n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, baseline_samples, ground_true_samples, model_name="Baseline (random [A-Za-z0-9])")
 
 
-   # train a bi-gram model to approximate the tri-gram model
+    # train a bi-gram model to approximate the tri-gram model
+    reset_seeds()
     model = BiGramModel(sample_sep=".", dummy_count=0)    
     model.train(ground_true_samples)
     print("Counting-based bi-gram model:")
@@ -77,6 +80,7 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     validate_samples(validator, generated_samples, ground_true_samples)
 
     # train a tri-gram model, this should have 100% accuracy given the stickiness is 1
+    reset_seeds()
     model = TriGramModel(sample_sep=".", dummy_count=0)
     model.train(ground_true_samples)
     print("Counting-based tri-gram model:")
@@ -86,6 +90,7 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     
 
     # use tokenizer for neural network based models
+    reset_seeds()
     tokenizer = CharacterTokenizer()
     # a-z A-Z 0-9
     token_samples = [string.ascii_lowercase + string.ascii_uppercase + string.digits]
@@ -93,6 +98,7 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
 
 
     # test neural network based bi-gram model, it should be able to approximate the counting-based bi-gram model
+    reset_seeds()
     look_back = 1
     epoch = 100
     learning_rate = 0.01
@@ -114,6 +120,7 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
     # train a neural network (MLP) based language model
     # it has insufficient context length (look back) to excel in performance
     # but should still be able to approximate the counting-based (N-1)-gram model with less parameters
+    reset_seeds()
     look_back = 1
     epoch = 100
     learning_rate = 0.01
@@ -135,6 +142,7 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
 
 
     # train a neural network (MLP) based language model, it should be able to approximate the counting-based N-gram model with much less free parameters
+    reset_seeds()
     look_back = 2
     epoch = 100
     learning_rate = 0.01
@@ -156,10 +164,12 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
 
 
     # Prepare dataset auto-regressive models
+    reset_seeds()
     dataset = prepare_auto_regressive_dataset(ground_true_samples, tokenizer)
 
 
     # train a RNN model with simple recurrent unit
+    reset_seeds()
     embed_size = 8
     hidden_state_size = 8
     epoch = 100
@@ -180,6 +190,7 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
 
     # train a RNN model with GRU (Gated Recurrent Unit) unit
     # reduced embedding/hidden size to match the RNN model parameter count
+    reset_seeds()
     embed_size = 7 
     hidden_state_size = 7
     epoch = 100
@@ -199,7 +210,8 @@ def test_sticky_rule(n_training: int, n_to_generate: int, min_len: int, max_len:
 
 
     # Train a transformer/GPT model
-    embed_size = 8
+    reset_seeds()
+    embed_size = 6
     max_context_size = 12
     n_layer = 1
     n_heads = 1
