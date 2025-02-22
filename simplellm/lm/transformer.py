@@ -1,4 +1,4 @@
-# GPT-2 like Language Model
+# (GPT-2 like) Transformer Based Language Model
 
 import datetime
 
@@ -135,7 +135,7 @@ class TransformerBlock(nn.Module):
         x = self.feed_forward(x) + x # (B, T, C)
         return x
 
-class GPTLanguageModel(nn.Module):
+class TransformerLM(nn.Module):
 
     def __init__(self, vocab_size: int, embed_size: int, max_context_size: int, n_layer: int, n_heads: int, head_size: int | None, ff_hidden_size: int | None):
         super().__init__()
@@ -193,7 +193,7 @@ class GPTLanguageModel(nn.Module):
         return self.lm_head.weight.device
 
 @torch.no_grad()
-def sample_from_gpt_model(model: GPTLanguageModel, tokenizer: CharacterTokenizer, max_new_tokens: int, n_samples: int):
+def sample_from_transformer(model: TransformerLM, tokenizer: CharacterTokenizer, max_new_tokens: int, n_samples: int):
     training = model.training
     model.train(False)
 
@@ -221,7 +221,7 @@ def sample_from_gpt_model(model: GPTLanguageModel, tokenizer: CharacterTokenizer
     return generated_samples
 
 
-def train_gpt_model(model: GPTLanguageModel, training_dataset: TensorDataset, batch_size=32, epochs=1000, learning_rate=0.01, ignore_token=0, validation_dataset: TensorDataset|None = None) -> GPTLanguageModel:
+def train_transformer(model: TransformerLM, training_dataset: TensorDataset, batch_size=32, epochs=1000, learning_rate=0.01, ignore_token=0, validation_dataset: TensorDataset|None = None) -> TransformerLM:
     training = DataLoader(training_dataset, batch_size=batch_size, shuffle=True)
     validation = None if validation_dataset is None else DataLoader(validation_dataset, batch_size=batch_size, shuffle=False)
 

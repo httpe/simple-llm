@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from .lm import BiGramModel, TriGramModel, TensorBiGramModel, MLPLanguageModel, RNNModel, CharacterTokenizer, prepare_n_gram_dataset, prepare_auto_regressive_dataset, train_torch_n_gram_model, train_auto_regressive_model, sample_torch_n_gram_model, sample_auto_regressive_model
-from .gpt import GPTLanguageModel, train_gpt_model, sample_from_gpt_model
+from .transformer import TransformerLM, train_transformer, sample_from_transformer
 from .llm_samples import llm_samples
 from . import sticky
 
@@ -212,7 +212,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     validate_samples(validator, generated_samples, training_samples)
 
 
-    # Train a transformer/GPT model
+    # Train a transformer model
     reset_seeds()
     embed_size = 6
     max_context_size = 12
@@ -223,16 +223,16 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
-    model = GPTLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
-    print("GPT model:")
+    model = TransformerLM(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
+    print("Transformer model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    path = os.path.join(model_save_dir, "gpt.pt")
+    path = os.path.join(model_save_dir, "transformer.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
     else:
-        model = train_gpt_model(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
+        model = train_transformer(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
         torch.save(model.state_dict(), path)
-    generated_samples = sample_from_gpt_model(model, tokenizer, max_new_tokens=max_len, n_samples=n_to_generate)
+    generated_samples = sample_from_transformer(model, tokenizer, max_new_tokens=max_len, n_samples=n_to_generate)
     validate_samples(validator, generated_samples, training_samples)
 
 if __name__ == "__main__":
