@@ -120,10 +120,10 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
 
 
     # train a neural network (MLP) based language model
-    # it has insufficient context length (look back) to excel in performance
+    # it has insufficient context length (look back) to, in theory, achieve a 100% accuracy
     # but should still be able to approximate the counting-based (N-1)-gram model with less parameters
     reset_seeds()
-    look_back = 1
+    look_back = stickiness
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
@@ -145,7 +145,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
 
     # train a neural network (MLP) based language model, it should be able to approximate the counting-based N-gram model with much less free parameters
     reset_seeds()
-    look_back = 2
+    look_back = stickiness + 1
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
@@ -249,6 +249,7 @@ if __name__ == "__main__":
     print("")
     stickiness = 1
     model_dir = os.path.join(SCRIPT_DIR, "models", f"stickiness_{stickiness}")
-    test_sticky_rule(n_training, n_validation, n_to_generate, min_len, max_len, stickiness=1, use_saved_model=use_saved_model, model_save_dir=model_dir)
+    os.makedirs(model_dir, exist_ok=True)
+    test_sticky_rule(n_training, n_validation, n_to_generate, min_len, max_len, stickiness=stickiness, use_saved_model=use_saved_model, model_save_dir=model_dir)
 
     
