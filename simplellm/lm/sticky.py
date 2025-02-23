@@ -6,7 +6,7 @@ import string
 ## Sample generation
 ##############################################
 
-def generate_single_sample(min_length: int, max_length: int, stickiness: int) -> str:
+def generate_single_sample(min_length: int, max_length: int, stickiness: int, strict: bool) -> str:
     '''
     Generate a random string with sticky character classes. 
     Possible character classes:
@@ -19,6 +19,8 @@ def generate_single_sample(min_length: int, max_length: int, stickiness: int) ->
         stickiness = 0: no stickiness, each character is independent
         stickiness = 1: each character class will last at least 2 times (unless the string is ended), e.g., aaAAAAA0
         stickiness = N: each character class will last at least N+1 times
+
+    strict: if true, each character class will last exactly N+1 times and then switch to another class
     '''
 
     assert 0 < min_length <= max_length
@@ -47,8 +49,12 @@ def generate_single_sample(min_length: int, max_length: int, stickiness: int) ->
             char_classes.append(prev)
             continue
         
-        # otherwise, randomly choose a new class
-        next = random.choice("aA0")
+        # otherwise, randomly choose a new class that is different from the previous one
+        if strict:
+            next_classes = "aA0".replace(prev, "")
+        else:
+            next_classes = "aA0"
+        next = random.choice(next_classes)
         char_classes.append(next)
         if next == prev:
             sticky_count += 1
@@ -68,15 +74,15 @@ def generate_single_sample(min_length: int, max_length: int, stickiness: int) ->
 
     return "".join(chars)
 
-def generate_samples(n_samples: int, min_length: int,  max_length: int, stickiness: int) -> list[str]:
-    samples = [generate_single_sample(min_length, max_length, stickiness) for _ in range(n_samples)]
+def generate_samples(n_samples: int, min_length: int,  max_length: int, stickiness: int, strict: bool) -> list[str]:
+    samples = [generate_single_sample(min_length, max_length, stickiness, strict) for _ in range(n_samples)]
     return samples
 
 ##############################################
 ## Sample validation
 ##############################################
 
-def validate_one_sample(stickiness: int, sample: str) -> bool:  
+def validate_one_sample(stickiness: int, strict: bool, sample: str) -> bool:  
     # convert the sample to character classes
     char_classes = []
     for c in sample:
@@ -97,6 +103,8 @@ def validate_one_sample(stickiness: int, sample: str) -> bool:
         prev = char_classes[i - 1]
         if char_classes[i] == prev:
             sticky_count += 1
+            if strict and sticky_count > stickiness:
+                return False
             # print(f"{i}, {sample[i]} ({char_classes[i]}): Sticky+1")
         else:
             if sticky_count < stickiness:

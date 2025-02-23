@@ -48,14 +48,14 @@ def validate_samples(validator: Callable[[str], bool], samples: list[str], exist
 
     return valid_flags
 
-def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min_len: int, max_len: int, stickiness: int, use_saved_model: bool, model_save_dir: str = SCRIPT_DIR):
+def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min_len: int, max_len: int, stickiness: int, strict: bool, use_saved_model: bool, model_save_dir: str = SCRIPT_DIR):
     # validator
-    validator = lambda x: sticky.validate_one_sample(stickiness, x)
+    validator = lambda x: sticky.validate_one_sample(stickiness, strict, x)
 
     # generate some samples from the ground truth model
     reset_seeds()
-    training_samples = sticky.generate_samples(n_samples=n_training, min_length=min_len, max_length=max_len, stickiness=stickiness)
-    validation_samples = sticky.generate_samples(n_samples=n_validation, min_length=min_len, max_length=max_len, stickiness=stickiness)
+    training_samples = sticky.generate_samples(n_samples=n_training, min_length=min_len, max_length=max_len, stickiness=stickiness, strict=strict)
+    validation_samples = sticky.generate_samples(n_samples=n_validation, min_length=min_len, max_length=max_len, stickiness=stickiness, strict=strict)
     assert all(validate_samples(validator, training_samples, model_name="Ground truth (training)"))
     assert all(validate_samples(validator, validation_samples, training_samples, model_name="Ground truth (validation)"))
 
@@ -248,8 +248,9 @@ if __name__ == "__main__":
     
     print("")
     stickiness = 1
-    model_dir = os.path.join(SCRIPT_DIR, "models", f"stickiness_{stickiness}")
+    strict = False
+    model_dir = os.path.join(SCRIPT_DIR, "models", f"stickiness_{stickiness}_{'strict' if strict else 'loose'}")
     os.makedirs(model_dir, exist_ok=True)
-    test_sticky_rule(n_training, n_validation, n_to_generate, min_len, max_len, stickiness=stickiness, use_saved_model=use_saved_model, model_save_dir=model_dir)
+    test_sticky_rule(n_training, n_validation, n_to_generate, min_len, max_len, stickiness=stickiness, strict=strict, use_saved_model=use_saved_model, model_save_dir=model_dir)
 
     
