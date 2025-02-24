@@ -4,9 +4,9 @@
 
 class CharacterTokenizer:
     def __init__(self) -> None:
-        self.start_sym = "."
-        self.end_sym = "+"
-        self.pad_sym = " "
+        self.start_sym = "^"
+        self.end_sym = "$"
+        self.pad_sym = "."
         self.start_token = 1
         self.end_token = 2
         self.pad_token = 0
