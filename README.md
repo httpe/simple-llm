@@ -82,9 +82,9 @@ The training data is synthesized with the following properties:
 
 We have implemented 3 synthetic datasets/distributions. In the order of difficulty:
 
-1. `sticky.py`: Generate a mix of lower case (a), upper case (A) and digit (0) characters, such that each class (a/A/0) will appear at least N times consecutively before switching to another class
-2. `counting.py`: Generate variable length counting sequence (consecutive integers separated by comma) for numbers up to N digits, e.g., "32,33,34"
-3. `arithmetic.py`: Generate addition formulas for numbers up to N digits, e.g. "22+13=35"
+1. `sticky.py`: Generate a mix of lower case (a), upper case (A) and digit (0) characters, such that each class (a/A/0) will appear at least N times consecutively before switching to another class, e.g., "acXYZ13a" (N=2)
+2. `counting.py`: Generate variable length counting sequence (consecutive integers separated by comma) for numbers up to N digits, e.g., "32,33,34" (N=2)
+3. `arithmetic.py`: Generate addition formulas for numbers up to N digits, e.g. "22+13=35" (N=2)
 
 Evaluation:
 
