@@ -233,11 +233,15 @@ def train_transformer(model: TransformerLM, training_dataset: TensorDataset, bat
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     
     # Training loop
+    print(f'{datetime.datetime.now().strftime("%d/%m/%Y, %H:%M:%S")} Training started')
+    model.train()
     for epoch in range(epochs):
         total_loss = 0
 
         for X_batch, Y_batch in training:
             # X_batch: (B, max(T))
+            X_batch = X_batch.to(model.device) 
+            Y_batch = Y_batch.to(model.device)
 
             # Forward pass
             logits = model(X_batch) # (B, T, V)
@@ -260,6 +264,8 @@ def train_transformer(model: TransformerLM, training_dataset: TensorDataset, bat
                 model.eval()
                 with torch.no_grad():
                     for X_batch, Y_batch in validation:
+                        X_batch = X_batch.to(model.device) 
+                        Y_batch = Y_batch.to(model.device)
                         logits = model(X_batch)
                         loss = criterion(logits.view(-1, logits.size(-1)), Y_batch.view(-1))
                         total_val_loss += loss.item() * batch_size

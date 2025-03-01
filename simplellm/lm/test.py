@@ -547,6 +547,33 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     validate_samples(validator, generated_samples, training_samples)
     print("")
 
+    # Train a bigger transformer model on GPU
+    if torch.cuda.is_available():
+        reset_seeds()
+        embed_size = 64
+        max_context_size = 16
+        n_layer = 10
+        n_heads = 8
+        head_size = None
+        ff_hidden_size = 256
+        epoch = 100
+        learning_rate = 0.001
+        batch_size = 256
+        model = TransformerLM(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
+        model = model.to("cuda")
+        print("(Bigger) Transformer model:")
+        print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+        path = os.path.join(model_save_dir, "transformer_bigger.pt")
+        if use_saved_model and os.path.exists(path):
+            model.load_state_dict(torch.load(path, weights_only=True))
+        else:
+            model = train_transformer(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
+            torch.save(model.state_dict(), path)
+
+        generated_samples = sample_from_transformer(model, tokenizer, max_new_tokens=sample_max_len, n_samples=n_to_generate)
+        validate_samples(validator, generated_samples, training_samples)
+        print("")
+
     
 
 def main():
