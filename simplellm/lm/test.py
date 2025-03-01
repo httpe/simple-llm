@@ -92,7 +92,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = BiGramModel(sample_sep=".", dummy_count=0)    
     model.train(training_samples)
     print("Counting-based bi-gram model:")
-    print("Parameter count: ", model.bigram_count.numel())
+    print("Parameter count: ", model.bigram_count.numel()) # 3969
     generated_samples = model.generate(n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -102,7 +102,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = TriGramModel(sample_sep=".", dummy_count=0)
     model.train(training_samples)
     print("Counting-based tri-gram model:")
-    print("Parameter count: ", model.trigram_count.numel())
+    print("Parameter count: ", model.trigram_count.numel()) # 250047
     generated_samples = model.generate(n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -125,7 +125,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     dataset = prepare_n_gram_dataset(training_samples, tokenizer, look_back=look_back)
     model = TensorBiGramModel(vocab_size=tokenizer.vocab_size)
     print("Tensor bi-gram model (train with cross-entropy loss and gradient descent):")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 4225
     path = os.path.join(model_save_dir, "tensor_bigram.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -150,7 +150,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     dataset = prepare_n_gram_dataset(training_samples, tokenizer, look_back=look_back)
     model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
     print(f"MLP with {look_back} characters context:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1177
     path = os.path.join(model_save_dir, f"mlp_lm_look_back_{look_back}.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -173,7 +173,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     dataset = prepare_n_gram_dataset(training_samples, tokenizer, look_back=look_back)
     model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
     print(f"MLP with {look_back} characters context:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1241
     path = os.path.join(model_save_dir, f"mlp_lm_look_back_{look_back}.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -200,7 +200,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     batch_size = 32
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=False)
     print("RNN model:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1249
     path = os.path.join(model_save_dir, "rnn.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -222,7 +222,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     batch_size = 32
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=True)
     print("GRU model:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1297
     path = os.path.join(model_save_dir, "gru.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -247,7 +247,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     batch_size = 32
     model = TransformerLM(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
     print("Transformer model:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1213
     path = os.path.join(model_save_dir, "transformer.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -295,6 +295,7 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     is_valid, _ = validate_samples(validator, training_samples)
     assert all(is_valid)
     training_numbers = unique_numbers_in_counting_samples(training_samples)
+    print("")
 
     print("Ground truth (validation):")
     validation_samples = counting.generate_samples(n_samples=n_validation,  max_digits=max_digits, max_count=max_count)
@@ -312,7 +313,7 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     model = TriGramModel(sample_sep=".", dummy_count=0)
     model.train(training_samples)
     print("Counting-based tri-gram model:")
-    print("Parameter count: ", model.trigram_count.numel())
+    print("Parameter count: ", model.trigram_count.numel()) # 1728
     generated_samples = model.generate(n_samples=n_to_generate, max_length=sample_max_len)
     validate_samples(validator, generated_samples, training_samples)
     unique_numbers_in_counting_samples(generated_samples, existing_numbers=training_numbers)
@@ -323,7 +324,7 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     tokenizer = CharacterTokenizer()
     token_samples = [x for x in string.digits] + [","]
     tokenizer.train(token_samples)
-
+    print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
 
     # train a neural network (MLP) based language model
     # it has insufficient context length (look back) to, in theory, achieve a 100% accuracy
@@ -441,6 +442,8 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     training_samples = arithmetics.generate_samples(n_samples=n_training, max_digits=max_digits)
     is_valid, _ = validate_samples(validator, training_samples)
     assert all(is_valid)
+    print("")
+
     print("Ground truth (validation):")
     validation_samples = arithmetics.generate_samples(n_samples=n_validation, max_digits=max_digits)
     is_valid, _ = validate_samples(validator, validation_samples, training_samples)
@@ -456,7 +459,7 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     model = TriGramModel(sample_sep=".", dummy_count=0)
     model.train(training_samples)
     print("Counting-based tri-gram model:")
-    print("Parameter count: ", model.trigram_count.numel())
+    print("Parameter count: ", model.trigram_count.numel()) # 2197
     generated_samples = model.generate(n_samples=n_to_generate, max_length=sample_max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -467,6 +470,7 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     tokenizer = CharacterTokenizer()
     token_samples = [x for x in string.digits] + ["+", "="]
     tokenizer.train(token_samples)
+    print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
 
     # train a neural network (MLP) based language model
     # it has insufficient context length (look back) to, in theory, achieve a 100% accuracy
