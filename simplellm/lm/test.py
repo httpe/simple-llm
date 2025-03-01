@@ -334,11 +334,11 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     learning_rate = 0.01
     batch_size = 32
     embed_size = 8
-    hidden_layer_sizes = [8,8]
+    hidden_layer_sizes = [32, 16]
     dataset = prepare_n_gram_dataset(training_samples, tokenizer, look_back=look_back)
     model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
     print(f"MLP with {look_back} characters context:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 3470
     path = os.path.join(model_save_dir, f"mlp_lm_look_back_{look_back}.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -357,17 +357,38 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     validation_dataset = prepare_auto_regressive_dataset(validation_samples, tokenizer)
 
 
+    # train a RNN model with simple recurrent unit
+    reset_seeds()
+    embed_size = 8
+    hidden_state_size = 64
+    epoch = 100
+    learning_rate = 0.001
+    batch_size = 32
+    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=False)
+    print("RNN model:")
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 5758
+    path = os.path.join(model_save_dir, "rnn.pt")
+    if use_saved_model and os.path.exists(path):
+        model.load_state_dict(torch.load(path, weights_only=True))
+    else:
+        model = train_auto_regressive_model(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+        torch.save(model.state_dict(), path)
+    generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=sample_max_len)
+    validate_samples(validator, generated_samples, training_samples)
+    print("")
+
+
     # train a RNN model with GRU (Gated Recurrent Unit) unit
     # reduced embedding/hidden size to match the RNN model parameter count
     reset_seeds()
     embed_size = 8
-    hidden_state_size = 8
+    hidden_state_size = 32
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=True)
     print("GRU model:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 4542
     path = os.path.join(model_save_dir, "gru.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -376,7 +397,6 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
         torch.save(model.state_dict(), path)
     generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=sample_max_len)
     validate_samples(validator, generated_samples, training_samples)
-    unique_numbers_in_counting_samples(generated_samples, existing_numbers=training_numbers)
     print("")
 
 
@@ -384,16 +404,16 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     reset_seeds()
     embed_size = 8
     max_context_size = sample_max_len
-    n_layer = 1
-    n_heads = 1
+    n_layer = 2
+    n_heads = 2
     head_size = None
-    ff_hidden_size = None
+    ff_hidden_size = 64
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
     model = TransformerLM(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
     print("Transformer model:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 3150
     path = os.path.join(model_save_dir, "transformer.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -454,14 +474,14 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     reset_seeds()
     look_back = 10
     epoch = 100
-    learning_rate = 0.01
+    learning_rate = 0.001
     batch_size = 32
-    embed_size = 8
-    hidden_layer_sizes = [8,8]
+    embed_size = 32
+    hidden_layer_sizes = [48,48,32]
     dataset = prepare_n_gram_dataset(training_samples, tokenizer, look_back=look_back)
     model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
     print(f"MLP with {look_back} characters context:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 20303
     path = os.path.join(model_save_dir, f"mlp_lm_look_back_{look_back}.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -481,14 +501,14 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
 
     # train a RNN model with simple recurrent unit
     reset_seeds()
-    embed_size = 8
-    hidden_state_size = 8
+    embed_size = 32
+    hidden_state_size = 128
     epoch = 100
-    learning_rate = 0.01
+    learning_rate = 0.001
     batch_size = 32
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=False)
     print("RNN model:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 23151
     path = os.path.join(model_save_dir, "rnn.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -503,14 +523,14 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     # train a RNN model with GRU (Gated Recurrent Unit) unit
     # reduced embedding/hidden size to match the RNN model parameter count
     reset_seeds()
-    embed_size = 7 
-    hidden_state_size = 7
+    embed_size = 32
+    hidden_state_size = 64
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=True)
     print("GRU model:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 20143
     path = os.path.join(model_save_dir, "gru.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -524,10 +544,10 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
 
     # Train a transformer model
     reset_seeds()
-    embed_size = 36
+    embed_size = 32
     max_context_size = 15
-    n_layer = 3
-    n_heads = 6
+    n_layer = 2
+    n_heads = 4
     head_size = None
     ff_hidden_size = 64
     epoch = 100
@@ -535,7 +555,7 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     batch_size = 32
     model = TransformerLM(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
     print("Transformer model:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 18415
     path = os.path.join(model_save_dir, "transformer.pt")
     if use_saved_model and os.path.exists(path):
         model.load_state_dict(torch.load(path, weights_only=True))
@@ -562,7 +582,7 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
         model = TransformerLM(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
         model = model.to("cuda")
         print("(Bigger) Transformer model:")
-        print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+        print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 501007
         path = os.path.join(model_save_dir, "transformer_bigger.pt")
         if use_saved_model and os.path.exists(path):
             model.load_state_dict(torch.load(path, weights_only=True))
