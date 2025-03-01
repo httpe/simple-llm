@@ -6,6 +6,8 @@ This implementation follows Andrej Karpathy's [Neural Networks: Zero to Hero](ht
 
 ## Getting Started
 
+This project is tested with Python 3.11.11.
+
 To try out the milestone test scripts below, first create a Python virtual environment, and install the dependencies:
 
 ```bash
