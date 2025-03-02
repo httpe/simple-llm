@@ -83,6 +83,7 @@ def main(n, train_test_split, hidden_sizes, batch_size):
 
     # Reference model: NN of one hidden layer, with 8 ReLu neurons
     reset_seeds()
+    print("Running: TorchNnMLP (Adam)")
     model_nn = TorchNnMLP(input_size=2, hidden_sizes=hidden_sizes, output_size=1)
     model_nn = train_torch_nn_model(dataloader, model=model_nn, epochs=1000, learning_rate=1.0)
     model_nn_loss_train = get_torch_model_loss(model_nn, dataset)
@@ -92,6 +93,7 @@ def main(n, train_test_split, hidden_sizes, batch_size):
 
     # Model implemented using PyTorch tensors:
     reset_seeds()
+    print("Running: TorchTensorMLP (Adam)")
     model_tensor_adam = TorchTensorMLP(input_size=2, hidden_sizes=hidden_sizes, output_size=1)
     model_tensor_adam = train_torch_tensor_model_adam(dataloader, model=model_tensor_adam, epochs=100, learning_rate=1.0)
     model_tensor_loss_adam_train = get_torch_model_loss(model_tensor_adam, dataset)
@@ -100,6 +102,7 @@ def main(n, train_test_split, hidden_sizes, batch_size):
     # TorchTensorMLP (Adam) Loss: Train = 61.5234, Test = 63.2537
 
     reset_seeds()
+    print("Running: TorchTensorMLP (SGD)")
     model_tensor_sgd = TorchTensorMLP(input_size=2, hidden_sizes=hidden_sizes, output_size=1)
     model_tensor_sgd = train_torch_tensor_model_sgd(dataloader, model=model_tensor_sgd, epochs=1000, learning_rate=0.01)
     model_tensor_loss_sgd_train = get_torch_model_loss(model_tensor_sgd, dataset)
@@ -109,6 +112,7 @@ def main(n, train_test_split, hidden_sizes, batch_size):
 
     # Model implemented using our autograd:
     reset_seeds()
+    print("Running: AutoGradMLP (Adam)")
     model_autograd_adam = AutoGradMLP(input_size=2, hidden_sizes=hidden_sizes, output_size=1)
     model_autograd_adam = train_auto_grad_model_adam(X_train, Y_train, model=model_autograd_adam, epochs=100, learning_rate=1.0, batch_size=batch_size)
     model_autograd_loss_adam_train = get_auto_grad_model_loss(model_autograd_adam, X_train, Y_train)
@@ -117,6 +121,7 @@ def main(n, train_test_split, hidden_sizes, batch_size):
     # AutoGradMLP (Adam) Loss: Train = 76.0929, Test = 75.1556
 
     reset_seeds()
+    print("Running: AutoGradMLP (SGD)")
     model_autograd_sgd = AutoGradMLP(input_size=2, hidden_sizes=hidden_sizes, output_size=1)
     model_autograd_sgd = train_auto_grad_model_sgd(X_train, Y_train, model=model_autograd_sgd, epochs=1000, learning_rate=0.01, batch_size=batch_size)
     model_autograd_loss_sgd_train = get_auto_grad_model_loss(model_autograd_sgd, X_train, Y_train)
