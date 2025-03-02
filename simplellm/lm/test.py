@@ -17,10 +17,38 @@ from . import counting
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
-def reset_seeds():
-    random.seed(0)
-    np.random.seed(0)
-    torch.manual_seed(0)
+def reset_seeds(seed: int = 0):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+def train_and_save_model(model: torch.nn.Module, trainer: Callable[[torch.nn.Module, int], torch.nn.Module], total_epoch: int, save_every_n_epoch: int, model_dir: str, model_name: str, use_saved_model: bool = True):
+    epoch_trained = 0
+    
+    # read the max epoch trained from disk
+    if use_saved_model:
+        for file in os.listdir(model_dir):
+            if file.startswith(f"{model_name}_epoch_") and file.endswith(".pt"):
+                epoch = int(file[len(f"{model_name}_epoch_"):-len(".pt")])
+                if epoch <= total_epoch:
+                    epoch_trained = max(epoch, epoch_trained)
+        path = os.path.join(model_dir, f"{model_name}_epoch_{epoch_trained}.pt")
+        if epoch_trained > 0:
+            print(f"Loading model from {path}")
+            model.load_state_dict(torch.load(path, weights_only=True))
+    
+    # finish training the model with the remaining epochs
+    while total_epoch - epoch_trained > 0:
+        epoch_to_train = min(save_every_n_epoch, total_epoch - epoch_trained)
+        print(f"Training model from {epoch_trained} epochs to {epoch_trained + epoch_to_train} epochs")
+        # reproducibility for continued training
+        reset_seeds(epoch_trained)
+        model = trainer(model, epoch_to_train)
+        epoch_trained += epoch_to_train
+        path = os.path.join(model_dir, f"{model_name}_epoch_{epoch_trained}.pt")
+        torch.save(model.state_dict(), path)
+ 
+    return model
 
 def validate_samples(validator: Callable[[str], bool], samples: list[str], existing_samples: list[str]| None = None):
     n_total = len(samples)
@@ -126,12 +154,8 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = TensorBiGramModel(vocab_size=tokenizer.vocab_size)
     print("Tensor bi-gram model (train with cross-entropy loss and gradient descent):")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 4225
-    path = os.path.join(model_save_dir, "tensor_bigram.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_torch_n_gram_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
-        torch.save(model.state_dict(), path)
+    trainer = lambda x, y: train_torch_n_gram_model(x, dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="tensor_bigram", use_saved_model=use_saved_model)
     generated_samples = sample_torch_n_gram_model(model, tokenizer, look_back=look_back, n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -151,12 +175,8 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
     print(f"MLP with {look_back} characters context:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1177
-    path = os.path.join(model_save_dir, f"mlp_lm_look_back_{look_back}.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_torch_n_gram_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
-        torch.save(model.state_dict(), path)
+    trainer = lambda x, y: train_torch_n_gram_model(x, dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name=f"mlp_lm_look_back_{look_back}", use_saved_model=use_saved_model)
     generated_samples = sample_torch_n_gram_model(model, tokenizer, look_back=look_back, n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -174,12 +194,8 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
     print(f"MLP with {look_back} characters context:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1241
-    path = os.path.join(model_save_dir, f"mlp_lm_look_back_{look_back}.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_torch_n_gram_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
-        torch.save(model.state_dict(), path)
+    trainer = lambda x, y: train_torch_n_gram_model(x, dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name=f"mlp_lm_look_back_{look_back}", use_saved_model=use_saved_model)
     generated_samples = sample_torch_n_gram_model(model, tokenizer, look_back=look_back, n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -201,12 +217,8 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=False)
     print("RNN model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1249
-    path = os.path.join(model_save_dir, "rnn.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_auto_regressive_model(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
-        torch.save(model.state_dict(), path)
+    trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="rnn", use_saved_model=use_saved_model)
     generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -223,12 +235,8 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=True)
     print("GRU model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1297
-    path = os.path.join(model_save_dir, "gru.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_auto_regressive_model(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
-        torch.save(model.state_dict(), path)
+    trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="gru", use_saved_model=use_saved_model)
     generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -248,12 +256,8 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     model = TransformerLM(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
     print("Transformer model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1213
-    path = os.path.join(model_save_dir, "transformer.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_transformer(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
-        torch.save(model.state_dict(), path)
+    trainer = lambda x, y: train_transformer(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="transformer", use_saved_model=use_saved_model)
     generated_samples = sample_from_transformer(model, tokenizer, max_new_tokens=max_len, n_samples=n_to_generate)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -341,12 +345,8 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
     print(f"MLP with {look_back} characters context:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 3470
-    path = os.path.join(model_save_dir, f"mlp_lm_look_back_{look_back}.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_torch_n_gram_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
-        torch.save(model.state_dict(), path)
+    trainer = lambda x, y: train_torch_n_gram_model(x, dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name=f"mlp_lm_look_back_{look_back}", use_saved_model=use_saved_model)
     generated_samples = sample_torch_n_gram_model(model, tokenizer, look_back=look_back, n_samples=n_to_generate, max_length=sample_max_len)
     validate_samples(validator, generated_samples, training_samples)
     unique_numbers_in_counting_samples(generated_samples, existing_numbers=training_numbers)
@@ -369,12 +369,8 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=False)
     print("RNN model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 5758
-    path = os.path.join(model_save_dir, "rnn.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_auto_regressive_model(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
-        torch.save(model.state_dict(), path)
+    trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="rnn", use_saved_model=use_saved_model)
     generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=sample_max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -391,12 +387,8 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=True)
     print("GRU model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 4542
-    path = os.path.join(model_save_dir, "gru.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_auto_regressive_model(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
-        torch.save(model.state_dict(), path)
+    trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="gru", use_saved_model=use_saved_model)
     generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=sample_max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -416,12 +408,8 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     model = TransformerLM(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
     print("Transformer model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 3150
-    path = os.path.join(model_save_dir, "transformer.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_transformer(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
-        torch.save(model.state_dict(), path)
+    trainer = lambda x, y: train_transformer(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="transformer", use_saved_model=use_saved_model)
     generated_samples = sample_from_transformer(model, tokenizer, max_new_tokens=sample_max_len, n_samples=n_to_generate)
     validate_samples(validator, generated_samples, training_samples)
     unique_numbers_in_counting_samples(generated_samples, existing_numbers=training_numbers)
@@ -478,7 +466,7 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     # it has insufficient context length (look back) to, in theory, achieve a 100% accuracy
     # but should still be able to approximate the counting-based (N-1)-gram model with less parameters
     reset_seeds()
-    look_back = 10
+    look_back = sample_max_len
     epoch = 100
     learning_rate = 0.001
     batch_size = 32
@@ -487,15 +475,12 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     dataset = prepare_n_gram_dataset(training_samples, tokenizer, look_back=look_back)
     model = MLPLanguageModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_sizes=hidden_layer_sizes, look_back=look_back)
     print(f"MLP with {look_back} characters context:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 20303
-    path = os.path.join(model_save_dir, f"mlp_lm_look_back_{look_back}.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_torch_n_gram_model(model, dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size)
-        torch.save(model.state_dict(), path)
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 21839
+    trainer = lambda x, y: train_torch_n_gram_model(x, dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name=f"mlp_lm_look_back_{look_back}", use_saved_model=use_saved_model)
     generated_samples = sample_torch_n_gram_model(model, tokenizer, look_back=look_back, n_samples=n_to_generate, max_length=sample_max_len)
-    validate_samples(validator, generated_samples, training_samples)
+    _, valid_samples = validate_samples(validator, generated_samples, training_samples)
+    # print(valid_samples)
     print("")
 
 
@@ -515,12 +500,8 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=False)
     print("RNN model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 23151
-    path = os.path.join(model_save_dir, "rnn.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_auto_regressive_model(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
-        torch.save(model.state_dict(), path)
+    trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="rnn", use_saved_model=use_saved_model)
     generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=sample_max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -537,12 +518,8 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=True)
     print("GRU model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 20143
-    path = os.path.join(model_save_dir, "gru.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_auto_regressive_model(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
-        torch.save(model.state_dict(), path)
+    trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="gru", use_saved_model=use_saved_model)
     generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=sample_max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -551,7 +528,7 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     # Train a transformer model
     reset_seeds()
     embed_size = 32
-    max_context_size = 16
+    max_context_size = sample_max_len
     n_layer = 2
     n_heads = 4
     head_size = None
@@ -561,23 +538,19 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     batch_size = 32
     model = TransformerLM(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
     print("Transformer model:")
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 18415
-    path = os.path.join(model_save_dir, "transformer.pt")
-    if use_saved_model and os.path.exists(path):
-        model.load_state_dict(torch.load(path, weights_only=True))
-    else:
-        model = train_transformer(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
-        torch.save(model.state_dict(), path)
-
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 18287
+    trainer = lambda x, y: train_transformer(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="transformer", use_saved_model=use_saved_model)
     generated_samples = sample_from_transformer(model, tokenizer, max_new_tokens=sample_max_len, n_samples=n_to_generate)
-    validate_samples(validator, generated_samples, training_samples)
+    _, valid_samples = validate_samples(validator, generated_samples, training_samples)
+    # print(valid_samples)
     print("")
 
     # Train a bigger transformer model on GPU
     if torch.cuda.is_available():
         reset_seeds()
         embed_size = 64
-        max_context_size = 16
+        max_context_size = sample_max_len
         n_layer = 10
         n_heads = 8
         head_size = None
@@ -588,19 +561,14 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
         model = TransformerLM(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
         model = model.to("cuda")
         print("(Bigger) Transformer model:")
-        print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 501007
-        path = os.path.join(model_save_dir, "transformer_bigger.pt")
-        if use_saved_model and os.path.exists(path):
-            model.load_state_dict(torch.load(path, weights_only=True))
-        else:
-            model = train_transformer(model, training_dataset, epochs=epoch, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
-            torch.save(model.state_dict(), path)
-
+        print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 500687
+        trainer = lambda x, y: train_transformer(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
+        model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="transformer_biger", use_saved_model=use_saved_model)
         generated_samples = sample_from_transformer(model, tokenizer, max_new_tokens=sample_max_len, n_samples=n_to_generate)
-        validate_samples(validator, generated_samples, training_samples)
+        _, valid_samples = validate_samples(validator, generated_samples, training_samples)
+        # print(valid_samples)
         print("")
 
-    
 
 def main():
     # general parameters
