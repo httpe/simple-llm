@@ -325,6 +325,7 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     token_samples = [x for x in string.digits] + [","]
     tokenizer.train(token_samples)
     print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
+    print("")
 
     # train a neural network (MLP) based language model
     # it has insufficient context length (look back) to, in theory, achieve a 100% accuracy
@@ -471,6 +472,7 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     token_samples = [x for x in string.digits] + ["+", "="]
     tokenizer.train(token_samples)
     print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
+    print("")
 
     # train a neural network (MLP) based language model
     # it has insufficient context length (look back) to, in theory, achieve a 100% accuracy
@@ -549,13 +551,13 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     # Train a transformer model
     reset_seeds()
     embed_size = 32
-    max_context_size = 15
+    max_context_size = 16
     n_layer = 2
     n_heads = 4
     head_size = None
     ff_hidden_size = 64
     epoch = 100
-    learning_rate = 0.01
+    learning_rate = 0.001
     batch_size = 32
     model = TransformerLM(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, n_layer=n_layer, n_heads=n_heads, head_size=head_size, ff_hidden_size=ff_hidden_size)
     print("Transformer model:")
