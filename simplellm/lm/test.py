@@ -22,7 +22,7 @@ def reset_seeds(seed: int = 0):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def train_and_save_model(model: torch.nn.Module, trainer: Callable[[torch.nn.Module, int], torch.nn.Module], total_epoch: int, save_every_n_epoch: int, model_dir: str, model_name: str, use_saved_model: bool = True):
+def train_and_save_model[T: torch.nn.Module](model: T, trainer: Callable[[T, int], T], total_epoch: int, save_every_n_epoch: int, model_dir: str, model_name: str, use_saved_model: bool = True):
     epoch_trained = 0
     
     # read the max epoch trained from disk
@@ -35,7 +35,11 @@ def train_and_save_model(model: torch.nn.Module, trainer: Callable[[torch.nn.Mod
         path = os.path.join(model_dir, f"{model_name}_epoch_{epoch_trained}.pt")
         if epoch_trained > 0:
             print(f"Loading model from {path}")
-            model.load_state_dict(torch.load(path, weights_only=True))
+            try:
+                model.load_state_dict(torch.load(path, weights_only=True))
+            except Exception as e:
+                epoch_trained = 0
+                print(f"Failed to load model from {path}: {e}")
     
     # finish training the model with the remaining epochs
     while total_epoch - epoch_trained > 0:
@@ -75,7 +79,7 @@ def validate_samples(validator: Callable[[str], bool], samples: list[str], exist
     print(f"Valid/New/Unique/Total: {n_valid}/{n_new}/{n_unique}/{n_total}")
     print(f"Accuracy (Valid/New) %: {100 * n_valid/n_new: 0.2f}%")
 
-    return is_valid, valid_samples
+    return list(zip(new_samples, is_valid)), valid_samples
 
 def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min_len: int, max_len: int, stickiness: int, strict: bool, use_saved_model: bool, model_save_dir: str = SCRIPT_DIR):
     print("===========================================")
@@ -206,6 +210,18 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     training_dataset = prepare_auto_regressive_dataset(training_samples, tokenizer)
     validation_dataset = prepare_auto_regressive_dataset(validation_samples, tokenizer)
 
+    # train a specialized RNN model with simple recurrent unit
+    # the initial parameters are set to be able to reproduce the distribution exactly (i.e. 100% accuracy)
+    reset_seeds()
+    print("Handcrafted RNN model for Sticky Distribution:")
+    epoch = 0 # do not train, just use the manual initialization
+    model = sticky.StickyRNNModel(use_manual_init=(stickiness, strict))
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1249
+    trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="my_rnn", use_saved_model=use_saved_model)
+    generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=max_len)
+    validate_samples(validator, generated_samples, training_samples)
+    print("")
 
     # train a RNN model with simple recurrent unit
     reset_seeds()
@@ -214,7 +230,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
-    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=False)
+    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, cell_type="rnn")
     print("RNN model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1249
     trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
@@ -232,7 +248,7 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
-    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=True)
+    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, cell_type="gru")
     print("GRU model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1297
     trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
@@ -366,7 +382,7 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     epoch = 100
     learning_rate = 0.001
     batch_size = 32
-    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=False)
+    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, cell_type="rnn")
     print("RNN model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 5758
     trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
@@ -384,7 +400,7 @@ def test_counting(n_training: int, n_validation: int, n_to_generate: int, max_di
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
-    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=True)
+    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, cell_type="gru")
     print("GRU model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 4542
     trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
@@ -497,7 +513,7 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     epoch = 100
     learning_rate = 0.001
     batch_size = 32
-    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=False)
+    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, cell_type="rnn")
     print("RNN model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 23151
     trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
@@ -515,7 +531,7 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
     epoch = 100
     learning_rate = 0.01
     batch_size = 32
-    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, use_gru=True)
+    model = RNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, hidden_state_size=hidden_state_size, cell_type="gru")
     print("GRU model:")
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 20143
     trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)

@@ -1,5 +1,7 @@
 # Various implementation of a simple character level language model
 
+from typing import Iterator, Literal, Protocol
+
 import datetime
 
 import torch
@@ -228,8 +230,27 @@ class GRUCell(nn.Module):
         hidden = (1 - z) * h + z * h_hat # (batch_size, hidden_state_size)
         return hidden
 
+
+class RNNProtocol(Protocol):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        ...
+
+    def step(self, x: torch.Tensor, hidden_prev: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+        ...
+    
+    def parameters(self) -> Iterator[torch.nn.Parameter]:
+        ...
+
+    @property
+    def vocab_size(self) -> int:
+        ...
+    
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        ...
+    
+
 class RNNModel(nn.Module):
-    def __init__(self, vocab_size: int, embed_size: int, hidden_state_size: int, use_gru: bool):
+    def __init__(self, vocab_size: int, embed_size: int, hidden_state_size: int, cell_type: Literal["rnn", "gru"]):
         super(RNNModel, self).__init__()
 
         self.vocab_size = vocab_size
@@ -237,14 +258,14 @@ class RNNModel(nn.Module):
         self.hidden_state_size = hidden_state_size
 
         self.embed = nn.Embedding(vocab_size, embed_size)
-        if use_gru:
+        if cell_type == 'gru':
             self.rnn_cell = GRUCell(embed_size, hidden_state_size)
         else:
             self.rnn_cell = RNNCell(embed_size, hidden_state_size)
         self.output_layer = nn.Linear(hidden_state_size, vocab_size)
 
         # register the hidden state as a parameter
-        self.init_hidden = nn.Parameter(torch.zeros(1, hidden_state_size))
+        self.init_hidden = nn.Parameter(torch.randn(1, hidden_state_size))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (batch_size, max_series_length), int tensor between 0 and vocab_size - 1
@@ -362,7 +383,7 @@ def train_torch_n_gram_model(model: nn.Module, dataset: TensorDataset, batch_siz
     return model
 
 
-def train_auto_regressive_model(model: RNNModel, dataset: TensorDataset, batch_size=32, epochs=1000, learning_rate=0.01, ignore_token=0) -> RNNModel:
+def train_auto_regressive_model[T: RNNProtocol](model: T, dataset: TensorDataset, batch_size=32, epochs=1000, learning_rate=0.01, ignore_token=0) -> T:
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     total_samples = len(dataloader.dataset) # type: ignore
@@ -424,7 +445,7 @@ def sample_torch_n_gram_model(model: nn.Module, tokenizer: CharacterTokenizer, l
     return samples
 
 @torch.no_grad()
-def sample_auto_regressive_model(model: RNNModel, tokenizer: CharacterTokenizer, n_samples: int = 10, max_length: int = 100) -> list[str]:
+def sample_auto_regressive_model(model: RNNProtocol, tokenizer: CharacterTokenizer, n_samples: int = 10, max_length: int = 100) -> list[str]:
     samples: list[str] = []
 
     with torch.no_grad():
@@ -437,7 +458,11 @@ def sample_auto_regressive_model(model: RNNModel, tokenizer: CharacterTokenizer,
                 current_token = torch.tensor(tokens[t]).unsqueeze(0) # (1,)
                 logits, hidden = model.step(current_token, hidden) # logits: (1, vocab_size), hidden: (1, hidden_state_size)
 
-                next_token = int(torch.multinomial(torch.softmax(logits[0], dim=0), 1).item()) 
+                probs = torch.softmax(logits[0], dim=0)
+                next_token = int(torch.multinomial(probs, 1).item()) 
+                # print(probs)
+                # print(tokenizer.decode([next_token]))
+                # breakpoint() # tokenizer.decode([next_token])
 
                 if next_token == tokenizer.end_token:
                     break

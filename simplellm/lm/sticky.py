@@ -1,6 +1,8 @@
 import random
 import string
 
+import torch
+import torch.nn as nn
 
 ##############################################
 ## Sample generation
@@ -138,3 +140,178 @@ class BaselineModel:
             samples.append(sample)
         return samples
 
+
+###################################################
+## NN Model Specialized for Sticky Distribution
+###################################################
+
+class StickyRNNModel(nn.Module):
+    def __init__(self, use_manual_init: tuple[int, bool] | None = None) -> None:
+        super().__init__()
+        
+        known_stickiness, known_strict = use_manual_init if use_manual_init is not None else (None, None)
+        if known_stickiness is not None:
+            print(f"Using manual initialization: stickiness={known_stickiness}, strict={known_strict}")
+
+        # 6 types of input:
+        # pad
+        # start
+        # end
+        # 0-9
+        # A-Z
+        # a-z
+        # this is the tokenizer order, as sorted(['a','z','A','Z','0','1','9']) -> ['0', '1', '9', 'A', 'Z', 'a', 'z']
+        self.vocab_size = 26 + 26 + 10 + 3 # V
+        embed_size = 6 # E
+
+        # embedding layer, we use one-hot encoding for each character class
+        if known_stickiness is not None:
+            embed_pad = torch.tensor([[1, 0, 0, 0, 0, 0]]).float()
+            embed_start = torch.tensor([[0, 1, 0, 0, 0, 0]]).float()
+            embed_end = torch.tensor([[0, 0, 1, 0, 0, 0]]).float()
+            embed_0to9 = torch.tensor([[0, 0, 0, 1, 0, 0]]).float().expand(10, -1)
+            embed_A2Z = torch.tensor([[0, 0, 0, 0, 1, 0]]).float().expand(26, -1)
+            embed_a2z = torch.tensor([[0, 0, 0, 0, 0, 1]]).float().expand(26, -1)
+            embed = torch.cat([embed_pad, embed_start, embed_end, embed_0to9, embed_A2Z, embed_a2z], dim=0)
+        else:
+            embed = torch.randn(self.vocab_size, embed_size)
+        self.embed = nn.Embedding(self.vocab_size, embed_size, _weight=embed) # shape: (V, E)
+        
+        # the hidden state keep a copy of the previous token, plus a accumulator of how many times we have seen the same kind of token
+        if known_stickiness is not None:
+            hidden_init = torch.tensor([[1,1,1,1,1,1] + [-1]]).float() # shape: (1, H), init state will be "compatible" to anything / predicted the first token to be anything, with zero accumulator
+        else:
+            hidden_init = torch.randn(1, 7)
+        self.hidden_init = nn.Parameter(hidden_init) # shape: (1, H), init state will be "compatible" to anything / predicted the first token to be anything, with zero accumulator
+
+        # we will reset the hidden state when the accumulator is larger than this threshold
+        if known_stickiness is not None:
+            reset_threshold = (torch.ones(1) * (known_stickiness + 1 - 0.5)).sqrt() # shape: (1,)
+        else:
+            reset_threshold = torch.randn(1)
+        self.reset_threshold = nn.Parameter(reset_threshold) # shape: (1,)
+
+        # temperature for the reset sigmoid function, lower -> more 0-1, higher -> softer
+        self.temperature = nn.Parameter(torch.tensor(0.01)) # shape: (1,)
+
+        # the output layer: from current input to the next token class
+
+        # case 1: if we transition to the next class based on the current class 
+        if known_stickiness is not None:
+            class_transition = torch.tensor([
+                [1,0,0,0,0,0], # if current input is pad, output pad
+                [0,0,0,1,1,1], # if current input is start, output 0-9, A-Z, a-z with equal probability
+                [1,0,0,0,0,0], # if current input is end, output pad
+                [0,0,1,1,0,0], # if current input is 0-9, still output 0-9, or end
+                [0,0,1,0,1,0], # if current input is A-Z, still output A-Z, or end
+                [0,0,1,0,0,1], # if current input is a-z, still output a-z, or end
+                ]).float()
+        else:
+            class_transition = torch.randn(embed_size, embed_size)
+        self.class_transition = nn.Parameter(class_transition) # shape: (E, E)
+        
+        # case 2: if we reset the class, i.e. forget about the current class and start over
+        if known_strict is not None:
+            if not known_strict:
+                # case 2.1: non-strict stickiness
+                reset_transition = torch.tensor([
+                    [1,0,0,0,0,0], # if current input is pad, output pad
+                    [0,0,0,1,1,1], # if current input is start, output 0-9, A-Z, a-z with equal probability
+                    [1,0,0,0,0,0], # if current input is end, output pad
+                    [0,0,1,1,1,1], # if current input is 0-9, output 0-9, A-Z, a-z with equal probability, or end
+                    [0,0,1,1,1,1], # if current input is A-Z, output 0-9, A-Z, a-z with equal probability, or end
+                    [0,0,1,1,1,1], # if current input is a-z, output 0-9, A-Z, a-z with equal probability, or end
+                    ]).float()
+            else:
+                # case 2.2: strict stickiness
+                reset_transition = torch.tensor([
+                    [1,0,0,0,0,0], # if current input is pad, output pad
+                    [0,0,0,1,1,1], # if current input is start, output 0-9, A-Z, a-z with equal probability
+                    [1,0,0,0,0,0], # if current input is end, output pad
+                    [0,0,1,0,1,1], # if current input is 0-9, output A-Z, a-z  with equal probability, or end
+                    [0,0,1,1,0,1], # if current input is A-Z, output 0-9, a-z with equal probability, or end
+                    [0,0,1,1,1,0], # if current input is a-z, output 0-9, A-Z with equal probability, or end
+                    ]).float()
+        else:
+            reset_transition = torch.randn(embed_size, embed_size)
+        self.reset_transition = nn.Parameter(reset_transition) # shape: (E, E)
+
+        # output logits
+        if known_stickiness is not None:
+            output = torch.tensor([
+                [10, -20, -20] + [-20] * 10 + [-20] * 26 + [-20] * 26, # padding
+                [-20, 10, -20] + [-20] * 10 + [-20] * 26 + [-20] * 26, # starting
+                [-20, -20, 10] + [-20] * 10 + [-20] * 26 + [-20] * 26, # ending
+                [-20, -20, -20] + [10] * 10 + [-20] * 26 + [-20] * 26, # 0-9
+                [-20, -20, -20] + [-20] * 10 + [10] * 26 + [-20] * 26, # A-Z
+                [-20, -20, -20] + [-20] * 10 + [-20] * 26 + [10] * 26, # a-z
+            ]).float()
+        else:
+            output = torch.randn(embed_size, self.vocab_size)
+        self.output = nn.Parameter(output) # shape: (E, V)
+
+    def rnn_cell(self, x: torch.Tensor, hidden: torch.Tensor):
+        # x: (B, E)
+        # hidden: (B, H)
+        expected_class = hidden[:, :-1] # shape: (B, E)
+        prev_accum = hidden[:, -1:] # shape: (B, 1)
+
+        # dot product similarity between current input class and expected class
+        similarity = (x * expected_class).sum(dim=1, keepdim=True) # shape: (B, 1)
+
+        # if similarity <= 0, reset the accumulator, if similarity = 1, add 1 to accumulator
+        # when in the middle, do an linear interpolatation
+        addition_raw = (1 + prev_accum) * similarity # shape: (B, 1)
+        addition = torch.relu(addition_raw)  - prev_accum # shape: (B, 1)
+        new_accum = prev_accum + addition # shape: (B, 1)
+
+        # if accumulator is larger than threshold, reset the accumulator and the expected class
+        new_accum_scaled = (new_accum - self.reset_threshold ** 2) / self.temperature
+        reset = torch.sigmoid(new_accum_scaled) # shape: (B, 1)
+
+        # reset the accumulator if needed
+        next_accum = (1 - reset) * new_accum
+
+        # predict the next class based on wheter to continue the transition or to reset
+        transition_class = x @ self.class_transition # shape: (B, E)
+        reset_class = x @ self.reset_transition # shape: (B, E)
+        next_class = reset * reset_class + (1 - reset) * transition_class
+
+        # next hidden state is the concatenation of the next class and the next accumulator
+        new_hidden = torch.cat([next_class, next_accum], dim=1) # shape: (B, 7)
+
+        # print(new_hidden)
+        # breakpoint()
+        return new_hidden
+    
+    def step(self, x: torch.Tensor, hidden_prev: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+        # x: (B,), int tensor between 0 and vocab_size - 1
+        # hidden_prev: (B, H)
+        if hidden_prev is None:
+            hidden_prev = self.hidden_init.expand(x.size(0), -1)
+        embed = self.embed(x) # (B, E)
+        hidden = self.rnn_cell(embed, hidden_prev) # (B, H)
+        logits = hidden[:, :-1] @ self.output # (B, E)
+        return logits, hidden
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T), int tensor between 0 and vocab_size - 1
+        embed = self.embed(x) # (B, T, E)
+
+        B, T, E = embed.shape
+
+        # initialize hidden state
+        hidden = self.hidden_init.expand(B, -1) # (B, H)
+        
+        # iterate over the series for each time step to get the hidden states
+        hidden_state_series = []
+        for t in range(T):
+            x_t = embed[:, t, :] # (B, E)
+            hidden = self.rnn_cell(x_t, hidden) # (B, H)
+            hidden_state_series.append(hidden)
+        
+        # convert the hidden states to logits
+        hidden_states = torch.stack(hidden_state_series, dim=1) # (B, T, H)
+        output_logits = hidden_states[:,:,:-1] @ self.output # (B, T, V)
+
+        return output_logits
