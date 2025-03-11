@@ -74,6 +74,7 @@ Model implementations:
       2. Multi-head attention
       3. Layer normalization
       4. Position encoding
+   4. Handcrafted network network model for a specific distribution, to explore the minimum NN that can express it (implemented for `sticky`)
 
 The training data is synthesized with the following properties:
 
