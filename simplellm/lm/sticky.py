@@ -4,6 +4,8 @@ import string
 import torch
 import torch.nn as nn
 
+from .tokenizer import CharacterTokenizer
+
 ##############################################
 ## Sample generation
 ##############################################
@@ -145,6 +147,206 @@ class BaselineModel:
 ## NN Model Specialized for Sticky Distribution
 ###################################################
 
+class StickyNNModel(nn.Module):
+    def __init__(self, max_context_size: int, use_manual_init: tuple[int, bool] | None = None) -> None:
+        super().__init__()
+
+        known_stickiness, known_strict = use_manual_init if use_manual_init is not None else (None, None)
+        if known_stickiness is not None:
+            print(f"Using manual initialization: stickiness={known_stickiness}, strict={known_strict}")
+
+        self.max_context_size = max_context_size
+
+        # 6 types of input:
+        # pad
+        # start
+        # end
+        # 0-9
+        # A-Z
+        # a-z
+        # this is the tokenizer order, as sorted(['a','z','A','Z','0','1','9']) -> ['0', '1', '9', 'A', 'Z', 'a', 'z']
+        self.vocab_size = 26 + 26 + 10 + 3 # V
+        embed_size = 6 # E
+
+        # embedding layer, we use one-hot encoding for each character class
+        if known_stickiness is not None:
+            embed_pad = torch.tensor([[1, 0, 0, 0, 0, 0]]).float()
+            embed_start = torch.tensor([[0, 1, 0, 0, 0, 0]]).float()
+            embed_end = torch.tensor([[0, 0, 1, 0, 0, 0]]).float()
+            embed_0to9 = torch.tensor([[0, 0, 0, 1, 0, 0]]).float().expand(10, -1)
+            embed_A2Z = torch.tensor([[0, 0, 0, 0, 1, 0]]).float().expand(26, -1)
+            embed_a2z = torch.tensor([[0, 0, 0, 0, 0, 1]]).float().expand(26, -1)
+            embed = torch.cat([embed_pad, embed_start, embed_end, embed_0to9, embed_A2Z, embed_a2z], dim=0)
+            embed = embed.log()
+        else:
+            embed = torch.randn(self.vocab_size, embed_size)
+        self.embed = nn.Embedding(self.vocab_size, embed_size, _weight=embed) # shape: (V, E)
+    
+        if known_stickiness is not None:
+            position_mask = torch.zeros(max_context_size, max_context_size)
+            for i in range(max_context_size):
+                for j in range(max_context_size):
+                    if j > i: # do not consider future tokens
+                        position_mask[i, j] = 0
+                    elif i - j <= known_stickiness: # only consider the last N=known_stickiness tokens
+                        position_mask[i, j] = 1
+                    else:
+                        position_mask[i, j] = 0
+        else:
+            position_mask = torch.rand(max_context_size, max_context_size)
+        # lower triangular matrix, only allow the model to see to the past
+        self.position_mask = nn.Parameter(torch.tril(position_mask)) # shape: (max_T, max_T)
+
+        # we will use reset rule when the token score is larger than this threshold
+        if known_stickiness is not None:
+            reset_threshold = (torch.ones(1) * (known_stickiness + 1 - 0.5)).sqrt() # shape: (1,)
+        else:
+            reset_threshold = torch.randn(1)
+        self.reset_threshold = nn.Parameter(reset_threshold) # shape: (1,)
+
+        # temperature for the reset sigmoid function, lower -> more 0-1, higher -> softer
+        self.temperature = nn.Parameter(torch.tensor(0.01).sqrt()) # shape: (1,)
+
+        # the output layer: from current input to the next token class
+
+        # case 1: if we are transitioning to the next class based on the current class 
+        if known_stickiness is not None:
+            class_transition = torch.tensor([
+                [1,0,0,0,0,0], # if current input is pad, output pad
+                [0,0,0,1,1,1], # if current input is start, output 0-9, A-Z, a-z with equal probability
+                [1,0,0,0,0,0], # if current input is end, output pad
+                [0,0,1,1,0,0], # if current input is 0-9, still output 0-9, or end
+                [0,0,1,0,1,0], # if current input is A-Z, still output A-Z, or end
+                [0,0,1,0,0,1], # if current input is a-z, still output a-z, or end
+                ]).float()
+        else:
+            class_transition = torch.randn(embed_size, embed_size)
+        self.class_transition = nn.Parameter(class_transition) # shape: (E, E)
+        
+        # case 2: if we reset the class, i.e. forget about the current class and start over
+        if known_strict is not None:
+            if not known_strict:
+                # case 2.1: non-strict stickiness
+                reset_transition = torch.tensor([
+                    [1,0,0,0,0,0], # if current input is pad, output pad
+                    [0,0,0,1,1,1], # if current input is start, output 0-9, A-Z, a-z with equal probability
+                    [1,0,0,0,0,0], # if current input is end, output pad
+                    [0,0,1,1,1,1], # if current input is 0-9, output 0-9, A-Z, a-z with equal probability, or end
+                    [0,0,1,1,1,1], # if current input is A-Z, output 0-9, A-Z, a-z with equal probability, or end
+                    [0,0,1,1,1,1], # if current input is a-z, output 0-9, A-Z, a-z with equal probability, or end
+                    ]).float()
+            else:
+                # case 2.2: strict stickiness
+                reset_transition = torch.tensor([
+                    [1,0,0,0,0,0], # if current input is pad, output pad
+                    [0,0,0,1,1,1], # if current input is start, output 0-9, A-Z, a-z with equal probability
+                    [1,0,0,0,0,0], # if current input is end, output pad
+                    [0,0,1,0,1,1], # if current input is 0-9, output A-Z, a-z  with equal probability, or end
+                    [0,0,1,1,0,1], # if current input is A-Z, output 0-9, a-z with equal probability, or end
+                    [0,0,1,1,1,0], # if current input is a-z, output 0-9, A-Z with equal probability, or end
+                    ]).float()
+        else:
+            reset_transition = torch.randn(embed_size, embed_size)
+        self.reset_transition = nn.Parameter(reset_transition) # shape: (E, E)
+
+        # output logits
+        if known_stickiness is not None:
+            output = torch.tensor([
+                [10, -20, -20] + [-20] * 10 + [-20] * 26 + [-20] * 26, # padding
+                [-20, 10, -20] + [-20] * 10 + [-20] * 26 + [-20] * 26, # starting
+                [-20, -20, 10] + [-20] * 10 + [-20] * 26 + [-20] * 26, # ending
+                [-20, -20, -20] + [10] * 10 + [-20] * 26 + [-20] * 26, # 0-9
+                [-20, -20, -20] + [-20] * 10 + [10] * 26 + [-20] * 26, # A-Z
+                [-20, -20, -20] + [-20] * 10 + [-20] * 26 + [10] * 26, # a-z
+            ]).float()
+        else:
+            output = torch.randn(embed_size, self.vocab_size)
+        self.output = nn.Parameter(output) # shape: (E, V)
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T), int tensor between 0 and vocab_size - 1
+        embed = self.embed(x) # (B, T, E)
+
+        # convert the embeddings to class probabilities
+        class_prob = torch.softmax(embed, -1)
+
+        B, T, E = embed.shape
+
+        similarity = class_prob @ class_prob.transpose(-2, -1) # (B, T, E) x (B, E, T) -> (B, T, T)
+
+        # apply the position weights
+        weights = torch.tril(self.position_mask[:T,:T]) # (T, T)
+        similarity = similarity * weights # (B,T,T)
+
+        # calculate the total simularity score for each token
+        score = similarity.sum(dim=-1) # (B, T)
+
+        # if score is larger than threshold, use reset rule, otherwise, use the transition rule
+        score_scaled = (score - self.reset_threshold ** 2) / self.temperature ** 2
+        reset = torch.sigmoid(score_scaled).unsqueeze(-1) # shape: (B, T, 1)
+        
+        # predict the next class based on wheter to continue the transition or to reset
+        
+        transition_class = class_prob @ self.class_transition # shape: (B, T, E)
+        reset_class = class_prob @ self.reset_transition # shape: (B, T, E)
+        next_class = reset * reset_class + (1 - reset) * transition_class # shape: (B, T, E)
+
+        # output logits
+        output_logits = next_class @ self.output # shape: (B, T, V)
+
+        return output_logits 
+
+    def generate(self, idx: torch.Tensor, max_new_tokens: int):
+        # idx is (B, T) array of indices in the current context
+        for _ in range(max_new_tokens):
+            # crop idx to the last block_size tokens
+            idx_cond = idx[:, -self.max_context_size:] # (B, T)
+            # get the predictions
+            logits = self(idx_cond) # (B, T, V)
+            # focus only on the last time step
+            logits = logits[:, -1, :] # (B, V)
+            # apply softmax to get probabilities
+            probs = torch.softmax(logits, dim=-1) # (B, V)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
+            # append sampled index to the running sequence
+            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
+        return idx
+    
+    @property
+    def device(self):
+        return self.embed.weight.device
+
+@torch.no_grad()
+def sample_from_sticky_nn_model(model: StickyNNModel, tokenizer: CharacterTokenizer, max_new_tokens: int, n_samples: int):
+    training = model.training
+    model.train(False)
+
+    idx = torch.zeros((n_samples, 1), dtype=torch.long).to(model.device)
+    idx[:, 0] = tokenizer.start_token
+
+    token_samples = model.generate(idx=idx, max_new_tokens=max_new_tokens)
+
+    generated_samples = []
+    for x in token_samples:
+        tokens = x.tolist()
+        content_tokens = []
+        for i in range(1, len(tokens)):
+            token = tokens[i]
+            if token == tokenizer.start_token or token == tokenizer.pad_token:
+                continue
+            if token == tokenizer.end_token:
+                break
+            content_tokens.append(token)
+        sample = tokenizer.decode(content_tokens)
+        generated_samples.append(sample)
+
+    model.train(training)
+
+    return generated_samples
+
+
 class StickyRNNModel(nn.Module):
     def __init__(self, use_manual_init: tuple[int, bool] | None = None) -> None:
         super().__init__()
@@ -257,7 +459,8 @@ class StickyRNNModel(nn.Module):
         prev_accum = hidden[:, -1:] # shape: (B, 1)
 
         # dot product similarity between current input class and expected class
-        similarity = (x * expected_class).sum(dim=1, keepdim=True) # shape: (B, 1)
+        similarity = x.unsqueeze(1) @ expected_class.unsqueeze(1).transpose(1,2) # shape: (B, 1, E) x (B, E, 1) -> (B, 1, 1)
+        similarity = similarity.squeeze(1) # shape: (B, 1)
 
         # if similarity <= 0, reset the accumulator, if similarity = 1, add 1 to accumulator
         # when in the middle, do an linear interpolatation

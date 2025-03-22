@@ -81,7 +81,7 @@ def validate_samples(validator: Callable[[str], bool], samples: list[str], exist
 
     return list(zip(new_samples, is_valid)), valid_samples
 
-def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min_len: int, max_len: int, stickiness: int, strict: bool, use_saved_model: bool, model_save_dir: str = SCRIPT_DIR):
+def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min_len: int, max_len: int, stickiness: int, strict: bool, use_saved_model: bool, use_manaul_init: bool, model_save_dir: str = SCRIPT_DIR):
     print("===========================================")
     print(f"Test Sticky Rule {stickiness=} {'strict' if strict else 'loose'}")
     print("===========================================")
@@ -105,8 +105,9 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
 
 
     # validate samples generated from LLMs
-    if f"stickiness_{stickiness}" in llm_samples:
-        for name, samples in llm_samples["stickiness_1"].items():
+    llm_output_type = f"stickiness_{stickiness}{'strict' if strict else 'loose'}"
+    if llm_output_type in llm_samples:
+        for name, samples in llm_samples[llm_output_type].items():
             print("LLM:", name)
             validate_samples(validator, samples, training_samples)
             print("")
@@ -210,15 +211,40 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     training_dataset = prepare_auto_regressive_dataset(training_samples, tokenizer)
     validation_dataset = prepare_auto_regressive_dataset(validation_samples, tokenizer)
 
+    # train a specialized NN model
+    reset_seeds()
+    print("Handcrafted NN model for Sticky Distribution:")
+    learning_rate = 0.01
+    batch_size = 32
+    epoch = 100
+    max_context_size = 12
+    if use_manaul_init:
+        model = sticky.StickyNNModel(max_context_size=max_context_size, use_manual_init=(stickiness, strict))
+    else:
+        model = sticky.StickyNNModel(max_context_size=max_context_size, use_manual_init=None) # 998
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
+    if not use_manaul_init:
+        trainer = lambda x, y: train_transformer(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
+        model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="sticky_nn", use_saved_model=use_saved_model)
+    generated_samples = sticky.sample_from_sticky_nn_model(model, tokenizer, max_new_tokens=max_len, n_samples=n_to_generate)
+    validate_samples(validator, generated_samples, training_samples)
+    print("")
+
     # train a specialized RNN model with simple recurrent unit
     # the initial parameters are set to be able to reproduce the distribution exactly (i.e. 100% accuracy)
     reset_seeds()
     print("Handcrafted RNN model for Sticky Distribution:")
-    epoch = 0 # do not train, just use the manual initialization
-    model = sticky.StickyRNNModel(use_manual_init=(stickiness, strict))
-    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 1249
-    trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
-    model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="my_rnn", use_saved_model=use_saved_model)
+    learning_rate = 0.01
+    batch_size = 32
+    epoch = 100 # do not train, just use the manual initialization
+    if use_manaul_init:
+        model = sticky.StickyRNNModel(use_manual_init=(stickiness, strict))
+    else:
+        model = sticky.StickyRNNModel(use_manual_init=None) # 
+    print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 861
+    if not use_manaul_init:
+        trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
+        model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="sticky_rnn", use_saved_model=use_saved_model)
     generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=max_len)
     validate_samples(validator, generated_samples, training_samples)
     print("")
@@ -589,6 +615,7 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
 def main():
     # general parameters
     use_saved_model = True
+    use_manual_init = False
     
     print("")
     stickiness = 1
@@ -596,7 +623,7 @@ def main():
     model_dir = os.path.join(SCRIPT_DIR, "model_checkpoints", f"stickiness_{stickiness}_{'strict' if strict_stickiness else 'loose'}")
     os.makedirs(model_dir, exist_ok=True)
     reset_seeds()
-    test_sticky_rule(n_training=1000, n_validation=200, n_to_generate=1000, min_len=3, max_len=10, stickiness=stickiness, strict=strict_stickiness, use_saved_model=use_saved_model, model_save_dir=model_dir)
+    test_sticky_rule(n_training=1000, n_validation=200, n_to_generate=1000, min_len=3, max_len=10, stickiness=stickiness, strict=strict_stickiness, use_saved_model=use_saved_model, use_manaul_init=use_manual_init, model_save_dir=model_dir)
     print("")
 
     print("")

@@ -221,7 +221,7 @@ def sample_from_transformer(model: TransformerLM, tokenizer: CharacterTokenizer,
     return generated_samples
 
 
-def train_transformer(model: TransformerLM, training_dataset: TensorDataset, batch_size=32, epochs=1000, learning_rate=0.01, ignore_token=0, validation_dataset: TensorDataset|None = None) -> TransformerLM:
+def train_transformer[T: nn.Module](model: T, training_dataset: TensorDataset, batch_size=32, epochs=1000, learning_rate=0.01, ignore_token=0, validation_dataset: TensorDataset|None = None) -> T:
     training = DataLoader(training_dataset, batch_size=batch_size, shuffle=True)
     validation = None if validation_dataset is None else DataLoader(validation_dataset, batch_size=batch_size, shuffle=False)
 

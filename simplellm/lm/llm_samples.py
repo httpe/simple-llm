@@ -2079,7 +2079,7 @@ def parse_sample_text(sample_text: str) -> list[str]:
 
 # Test date: 2025-02-14
 llm_samples = {
-    "stickiness_1": {
+    "stickiness_1_loose": {
         "DeepSeek v3": parse_sample_text(deepseek_v3_samples),
         "DeepSeek R1": parse_sample_text(deepseek_r1_samples),
         "DeepSeek R1 prompt2": parse_sample_text(deepseek_r1_prompt2_samples),
