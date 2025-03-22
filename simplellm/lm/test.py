@@ -218,10 +218,11 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     batch_size = 32
     epoch = 100
     max_context_size = 12
+    embed_size = 6
     if use_manaul_init:
-        model = sticky.StickyNNModel(max_context_size=max_context_size, use_manual_init=(stickiness, strict))
+        model = sticky.StickyNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, use_manual_init=(stickiness, strict))
     else:
-        model = sticky.StickyNNModel(max_context_size=max_context_size, use_manual_init=None) # 998
+        model = sticky.StickyNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, use_manual_init=None) # 998
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
     if not use_manaul_init:
         trainer = lambda x, y: train_transformer(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)

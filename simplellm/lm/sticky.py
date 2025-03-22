@@ -148,7 +148,7 @@ class BaselineModel:
 ###################################################
 
 class StickyNNModel(nn.Module):
-    def __init__(self, max_context_size: int, use_manual_init: tuple[int, bool] | None = None) -> None:
+    def __init__(self, vocab_size: int, embed_size: int, max_context_size: int, use_manual_init: tuple[int, bool] | None = None) -> None:
         super().__init__()
 
         known_stickiness, known_strict = use_manual_init if use_manual_init is not None else (None, None)
@@ -156,17 +156,20 @@ class StickyNNModel(nn.Module):
             print(f"Using manual initialization: stickiness={known_stickiness}, strict={known_strict}")
 
         self.max_context_size = max_context_size
+        self.vocab_size = vocab_size # V
+        self.embed_size = embed_size # E
 
-        # 6 types of input:
-        # pad
-        # start
-        # end
-        # 0-9
-        # A-Z
-        # a-z
-        # this is the tokenizer order, as sorted(['a','z','A','Z','0','1','9']) -> ['0', '1', '9', 'A', 'Z', 'a', 'z']
-        self.vocab_size = 26 + 26 + 10 + 3 # V
-        embed_size = 6 # E
+        if use_manual_init:
+            # 6 types of input:
+            # pad
+            # start
+            # end
+            # 0-9
+            # A-Z
+            # a-z
+            # this is the tokenizer order, as sorted(['a','z','A','Z','0','1','9']) -> ['0', '1', '9', 'A', 'Z', 'a', 'z']
+            assert vocab_size == 26 + 26 + 10 + 3 # V
+            assert embed_size == 6 # E
 
         # embedding layer, we use one-hot encoding for each character class
         if known_stickiness is not None:
