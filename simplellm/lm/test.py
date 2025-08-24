@@ -81,7 +81,7 @@ def validate_samples(validator: Callable[[str], bool], samples: list[str], exist
 
     return list(zip(new_samples, is_valid)), valid_samples
 
-def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min_len: int, max_len: int, stickiness: int, strict: bool, use_saved_model: bool, use_manaul_init: bool, model_save_dir: str = SCRIPT_DIR):
+def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min_len: int, max_len: int, stickiness: int, strict: bool, use_saved_model: bool, use_manual_init: bool, model_save_dir: str = SCRIPT_DIR):
     print("===========================================")
     print(f"Test Sticky Rule {stickiness=} {'strict' if strict else 'loose'}")
     print("===========================================")
@@ -219,12 +219,12 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     epoch = 100
     max_context_size = 12
     embed_size = 6
-    if use_manaul_init:
+    if use_manual_init:
         model = sticky.StickyNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, use_manual_init=(stickiness, strict))
     else:
         model = sticky.StickyNNModel(vocab_size=tokenizer.vocab_size, embed_size=embed_size, max_context_size=max_context_size, use_manual_init=None) # 998
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad))
-    if not use_manaul_init:
+    if not use_manual_init:
         trainer = lambda x, y: train_transformer(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token, validation_dataset=validation_dataset)
         model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="sticky_nn", use_saved_model=use_saved_model)
     generated_samples = sticky.sample_from_sticky_nn_model(model, tokenizer, max_new_tokens=max_len, n_samples=n_to_generate)
@@ -238,12 +238,12 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
     learning_rate = 0.01
     batch_size = 32
     epoch = 100 # do not train, just use the manual initialization
-    if use_manaul_init:
+    if use_manual_init:
         model = sticky.StickyRNNModel(use_manual_init=(stickiness, strict))
     else:
         model = sticky.StickyRNNModel(use_manual_init=None) # 
     print("Parameter count: ", sum(p.numel() for p in model.parameters() if p.requires_grad)) # 861
-    if not use_manaul_init:
+    if not use_manual_init:
         trainer = lambda x, y: train_auto_regressive_model(x, training_dataset, epochs=y, learning_rate=learning_rate, batch_size=batch_size, ignore_token=tokenizer.pad_token)
         model = train_and_save_model(model, trainer, total_epoch=epoch, save_every_n_epoch=100, model_dir=model_save_dir, model_name="sticky_rnn", use_saved_model=use_saved_model)
     generated_samples = sample_auto_regressive_model(model, tokenizer, n_samples=n_to_generate, max_length=max_len)
@@ -611,6 +611,9 @@ def test_addition(n_training: int, n_validation: int, n_to_generate: int, max_di
         _, valid_samples = validate_samples(validator, generated_samples, training_samples)
         # print(valid_samples)
         print("")
+    else:
+        print("CUDA not available, skipping bigger transformer model training.")
+        print("")
 
 
 def main():
@@ -624,7 +627,7 @@ def main():
     model_dir = os.path.join(SCRIPT_DIR, "model_checkpoints", f"stickiness_{stickiness}_{'strict' if strict_stickiness else 'loose'}")
     os.makedirs(model_dir, exist_ok=True)
     reset_seeds()
-    test_sticky_rule(n_training=1000, n_validation=200, n_to_generate=1000, min_len=3, max_len=10, stickiness=stickiness, strict=strict_stickiness, use_saved_model=use_saved_model, use_manaul_init=use_manual_init, model_save_dir=model_dir)
+    test_sticky_rule(n_training=1000, n_validation=200, n_to_generate=1000, min_len=3, max_len=10, stickiness=stickiness, strict=strict_stickiness, use_saved_model=use_saved_model, use_manual_init=use_manual_init, model_save_dir=model_dir)
     print("")
 
     print("")
@@ -643,6 +646,8 @@ def main():
     reset_seeds()
     test_addition(n_training=3500, n_validation=1000, n_to_generate=2000, max_digits=max_digits, use_saved_model=use_saved_model, model_save_dir=model_dir)
     print("")
+    
+    print("All tests completed.")
 
 
 if __name__ == "__main__":
