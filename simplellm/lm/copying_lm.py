@@ -1,7 +1,10 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import random
+
+from .transformer import TransformerLM, TransformerBlock
 
 ##############################################
 # Vocabulary / special tokens
@@ -155,6 +158,8 @@ def generate_take_last_samples(batch_size, max_seq_len, vocab_size, min_separato
 # NN Model Definition
 ##############################################
 
+DEBUG_GROUND_TRUTH = None
+
 def rotate_every_two(x):
     # x: [..., D]
     x1 = x[..., ::2]
@@ -250,6 +255,105 @@ class PointerGeneratorLM(nn.Module):
         # Final distribution
         P_final = gate * P_gen + (1 - gate) * P_copy
 
+        if DEBUG_GROUND_TRUTH is not None:
+            pred_next = P_final[:, -1].argmax(dim=-1) # [B]
+            ground_truth_next = DEBUG_GROUND_TRUTH[:, S] # [B]
+            if (pred_next != ground_truth_next).any():
+                print(f"Debugging the step to generate index {S}")
+                breakpoint()
+
+        return P_final   # [B, S, V]
+
+
+class TransformerPointerGeneratorLM(nn.Module):
+    def __init__(self, vocab_size, d_model, max_len, n_head, num_layers):
+        super().__init__()
+
+        self.vocab_size = vocab_size
+        self.D = d_model
+        assert self.D % 2 == 0, "d_model must be even for RoPE"
+        
+        # Embeddings
+        self.token_embed = nn.Embedding(vocab_size, d_model)
+        self.abs_pos_embed = nn.Embedding(max_len, d_model)
+
+        # Auto-regressive core: unidirectional GRU
+        self.gru = nn.GRU(d_model, d_model, batch_first=True)
+
+        assert num_layers == 1, "Currently only support 1 transformer layer"
+        self.tf_block = TransformerBlock(max_context_size=max_len, embed_size=d_model, n_heads=n_head, head_size=None, ff_hidden_size=None)
+
+        # Generator projection: takes [transformer state + attention wavg context]
+        self.gen_proj = nn.Linear(d_model * 2, vocab_size)
+
+        # Gate now depends on [transformer state + attention wavg context]
+        self.gate = nn.Linear(d_model * 2, 1)
+
+    def forward(self, x):
+        B, S = x.size()
+        device = x.device
+
+        # Embed input
+        x_emb = self.token_embed(x)  # [B, S, D]
+        
+        # Process with GRU. The output is already causal.
+        gru_out, _ = self.gru(x_emb)  # [B, S, D]
+
+        # transformer reasoning block
+        transformer_out = self.tf_block(gru_out)  # [B, S, D]
+
+        # Use transformer_out as the basis for pointer generation, as both Q and K
+        Q_ptr = transformer_out
+        K_ptr = transformer_out
+        
+        # We can still add our robust position information here for the final pointing step
+        # sin, cos = build_rope_sin_cos(S, self.D, device=device)
+        # Q_ptr_rope = apply_rotary_pos_emb(Q_ptr, sin, cos)
+        # K_ptr_rope = apply_rotary_pos_emb(K_ptr, sin, cos)
+
+        # content based self-attention score
+        content_scores = torch.bmm(Q_ptr, K_ptr.transpose(1, 2))
+        
+        # absolute position based attention score
+        key_abs_pos_ids = torch.arange(S, device=device).unsqueeze(0).repeat(B, 1) # [B, S]
+        abs_pos_embeddings = self.abs_pos_embed(key_abs_pos_ids) # [B, S, D]
+        abs_pos_scores = torch.bmm(Q_ptr, abs_pos_embeddings.transpose(1, 2))
+
+        # Combine content and absolute position scores for pointer-generation
+        pointer_scores = (content_scores + abs_pos_scores) / (Q_ptr.size(-1)**0.5)
+
+        # Apply the causal mask to the pointer scores as well
+        mask_ptr = torch.triu(torch.ones(S, S, device=device), diagonal=1).bool()
+        pointer_scores = pointer_scores.masked_fill(mask_ptr, -torch.inf)
+        
+        pos_probs = F.softmax(pointer_scores, dim=-1) # [B, S, S]
+
+        # Copy distribution for each token is the sum of pos_probs for all of its occurrences in the source history
+        x_one_hot = F.one_hot(x, num_classes=self.vocab_size).float()  # [B, S, V]
+        P_copy = torch.bmm(pos_probs, x_one_hot)       # [B, S, V]
+
+        # Compute attention-weighted context vector
+        context = torch.bmm(pos_probs, transformer_out)         # [B, S, D]
+
+        # Combine transformer state with context for generation and gating
+        combined = torch.cat([transformer_out, context], dim=-1)  # [B, S, 2*D]
+
+        # Context-aware generator (non-copy/generate new token) distribution
+        P_gen = F.softmax(self.gen_proj(combined), dim=-1)  # [B, S, V]
+
+        # Context-aware gating: copy vs generate 
+        gate = torch.sigmoid(self.gate(combined))           # [B, S, 1]
+
+        # Final distribution
+        P_final = gate * P_gen + (1 - gate) * P_copy
+
+        if DEBUG_GROUND_TRUTH is not None:
+            pred_next = P_final[:, -1].argmax(dim=-1) # [B]
+            ground_truth_next = DEBUG_GROUND_TRUTH[:, S] # [B]
+            if (pred_next != ground_truth_next).any():
+                print(f"Debugging the step to generate index {S}")
+                breakpoint()
+
         return P_final   # [B, S, V]
 
 # ============================================================
@@ -259,43 +363,42 @@ class PointerGeneratorLM(nn.Module):
 def greedy_decode(model, lm_seq):
     B, S = lm_seq.size()
     device = lm_seq.device
-    max_len = S  # maximum generation length
-    
-    # Find END_IN token positions to determine where generation should start
-    end_in_pos = (lm_seq == END_IN).nonzero(as_tuple=True)[1]
-    
-    # Initialize with source context
-    outputs = torch.full((B, max_len), PAD, device=device) # [B, max_len]
+    max_len = S
 
+    # compute per-example index of END_IN
+    end_in_pos = (lm_seq == END_IN).int().argmax(dim=1)  # [B]
+
+    outputs = torch.full((B, max_len), PAD, device=device, dtype=torch.long)
     finished = torch.zeros(B, dtype=torch.bool, device=device)
 
     for t in range(max_len):
-        # At step t, we generate outputs[:, t]
-
-        to_generate = end_in_pos < t  # [B], which sequences should generate at this step
+        # sequences that should start generating (we copy from src until t > end_in_pos)
+        to_generate = (t > end_in_pos)  # [B]  (True: we are in generation phase)
         if not to_generate.any():
-            outputs[:, t] = lm_seq[:, t].clone()  # copy from src until we reach END_IN
+            # copy from source for all examples this step
+            outputs[:, t] = lm_seq[:, t].clone()
             continue
 
         input_t = outputs[:, :t]  # [B, t]
+        if input_t.size(1) == 0:
+            # Model expects some length; feed a 1-step BOS maybe — but your model can handle zero-length?
+            # Easiest: feed a single BOS for all (or pad). We'll feed the prefix as-is if t==0 that branch never runs because to_generate false.
+            pass
 
-        P_final = model(input_t)   # [B, T, V]
+        P_final = model(input_t)   # [B, T, V], where T == t
         next_token = P_final[:, -1].argmax(dim=-1) # [B]
 
-        # Copy from source if not generating
+        # For examples not yet in generation phase, copy from source (preserve)
         next_token[~to_generate] = lm_seq[~to_generate, t]
 
-        # Mark sequences as finished if they generated END_OUT
-        existing_finished = finished.clone()
+        # mark newly finished
         newly_finished = (next_token == END_OUT)
+        # prevent tokens after finished from being non-PAD
+        next_token[finished] = PAD
+
         finished = finished | newly_finished
-
-        # For previously finished sequences, force PAD token
-        next_token[existing_finished] = PAD
-
         outputs[:, t] = next_token.clone()
 
-        # If all sequences are finished, we can break early
         if finished.all():
             break
 
@@ -305,6 +408,21 @@ def greedy_decode(model, lm_seq):
 # ============================================================
 # Training Loop
 # ============================================================
+
+def debug_model(model, test_lm_input):
+    global DEBUG_GROUND_TRUTH
+    pred = greedy_decode(model, test_lm_input)
+    bad = (pred != test_lm_input).any(dim=1)
+    bad_idx = bad.nonzero(as_tuple=True)[0]
+    if len(bad_idx) == 0:
+        return
+    print("Debugging model on a bad sample...")
+    bad_sample = test_lm_input[bad_idx[0], :].unsqueeze(0)
+    print("Bad sample:", bad_sample)
+    print("Prediction:", pred[bad_idx[0], :])
+    DEBUG_GROUND_TRUTH = bad_sample 
+    greedy_decode(model, bad_sample)
+    DEBUG_GROUND_TRUTH = None
 
 def convert_to_lm_input_output(src, tgt_out, pad_token=PAD):
     B, T = src.size()
@@ -330,13 +448,22 @@ def convert_to_lm_input_output(src, tgt_out, pad_token=PAD):
 
 def train():
     vocab_size = 30
-    d_model = 32
+    d_model = 16
     max_seq_len = 24
     max_separators = 2
     batch_size = 128
     num_steps = 10000
     lr = 1e-3
-    model_type = "take_last" # "copy" or "take_last"
+    model_type = "copy" # "copy" or "take_last"
+
+    n_head = 1          # Number of attention heads
+    num_layers = 1      # Number of transformer layers (THIS IS THE DEPTH)
+
+    # model_save_dir = f"./ptrGen_{model_type}_v{vocab_size}_d{d_model}_l{max_seq_len}"
+    model_save_dir = f"./tfBlock4Content_tfHead{n_head}_tfLayer{num_layers}_contentAndAbsPosAttn_{model_type}_v{vocab_size}_d{d_model}_l{max_seq_len}"
+
+    use_saved_model = True
+    debug = False
 
     # fix seeds
     torch.manual_seed(42)
@@ -353,10 +480,34 @@ def train():
     device = "cpu"
 
     # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
-    model = PointerGeneratorLM(vocab_size, d_model, max_len=max_seq_len * 2).to(device)
+    model_max_context_size = max_seq_len * 2
+
+    # possible models:
+    # model = PointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size).to(device)
+    model = TransformerPointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size, n_head=n_head, num_layers=num_layers).to(device)
+    # model = TransformerLM(vocab_size, d_model, max_context_size=model_max_context_size, n_heads=n_head, n_layer=num_layers, head_size=None, ff_hidden_size=None).to(device)
+
     # print model parameter count
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model Parameter Count: {num_params}")
+
+    # find max step model
+    max_step = 0
+    if use_saved_model:
+        saved_models = os.listdir(model_save_dir) if os.path.exists(model_save_dir) else []
+        path = None
+        for fn in saved_models:
+            if fn.endswith(".pt"):
+                parts = fn.split("step")
+                step = int(parts[1].split(".")[0])
+                if step > max_step:
+                    max_step = step
+                    path = os.path.join(model_save_dir, fn)
+        if path is not None:
+            model.load_state_dict(torch.load(path, map_location=device))
+            print("Loaded saved model from", path)
+
+
 
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss(ignore_index=0)
@@ -366,7 +517,14 @@ def train():
     test_tgt_out = test_tgt_out.to(device)
     test_lm_input, _ = convert_to_lm_input_output(test_src, test_tgt_out, pad_token=PAD)
 
-    for step in range(1, num_steps+1):
+    # debug model for any bad samples
+    if debug:
+        model.eval()
+        with torch.no_grad():
+            debug_model(model, test_lm_input)
+        model.train()
+
+    for step in range(max_step + 1, num_steps+1):
         src, _, tgt_out = gen_samples(batch_size)
         src, tgt_out = src.to(device), tgt_out.to(device)
 
@@ -380,10 +538,10 @@ def train():
         loss.backward()
         opt.step()
 
-        # decrease lr after half the steps
-        if step > num_steps // 2:
-            for param_group in opt.param_groups:
-                param_group['lr'] = lr * 0.1
+        # # decrease lr after half the steps
+        # if step > num_steps // 2:
+        #     for param_group in opt.param_groups:
+        #         param_group['lr'] = lr * 0.1
 
         if step % 200 == 0:
             print(f"Step {step}, Loss={loss.item():.4f}")
@@ -416,7 +574,16 @@ def train():
 
                 print("------------------------------------")
                 print("")
+
             model.train()
+
+            # save model
+            if not os.path.exists(model_save_dir):
+                os.makedirs(model_save_dir)
+            acc_floor = int(acc * 100)
+            path = os.path.join(model_save_dir, f"acc_{acc_floor}_step{step}.pt")
+            torch.save(model.state_dict(), path)
+            print("Saved model to", path)
 
 if __name__ == "__main__":
     train()
