@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import random
+import shutil
+import datetime
 
 from .transformer import TransformerLM, TransformerBlock
 
@@ -21,138 +23,283 @@ FIRST_TOKEN = 5  # random tokens start from this id
 # Sample generation
 ##############################################
 
-def generate_copy_samples(batch_size, max_seq_len, vocab_size):
-    """
-    Generate samples of form:
-    Src:        [BOS,       TOKEN 1, TOKEN 2, ..., TOKEN N, END_IN,     PAD 1, ..., PAD M]
-    Tgt_in:     [BOS,       TOKEN 1, TOKEN 2, ..., TOKEN N, END_OUT,    PAD 1, ..., PAD M]
-    Tgt_out:    [TOKEN 1,   TOKEN 2, TOKEN 3, ..., END_OUT, PAD 1,      PAD 2, ..., PAD M+1]
-    """
-    assert vocab_size > FIRST_TOKEN, "vocab_size must be > FIRST_TOKEN, so we have enough room for special tokens"
-    assert max_seq_len >= 2, "seq_len must be at least 2 to fit BOS and END_IN"
+def convert_seq2seq_samples_to_lm_sample(src, tgt_out, pad_token=PAD):
+    B, T = src.size()
+    device = src.device
 
-    # max_seq_len == 5
-    # max_content_len == 3
-    max_content_len = max_seq_len - 2  # exclude BOS and END_IN
+    lm_input = torch.full((B, T + tgt_out.shape[1]), pad_token, dtype=torch.long, device=device)
 
-    # [5, 9, 7]
-    content = torch.randint(FIRST_TOKEN, vocab_size, (batch_size, max_content_len))
+    for i in range(B):
+        # Find where src ends (at END_IN) and tgt_out ends (at END_OUT)
+        src_len = (src[i] != pad_token).sum().item()
+        tgt_out_len = (tgt_out[i] != pad_token).sum().item()
 
-    src = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
-    tgt_in = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
-    tgt_out = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
-    for i in range(batch_size):
-        # content_len == 2
-        content_len = random.randint(1, max_content_len) # make sure the sequence is non-empty (not just BOS and END)
+        # Concatenate src and the content of tgt_out (tgt_out thus no BOS after END_IN)
+        # [BOS, ..., END_IN, ..., END_OUT]
+        full_seq = torch.cat([src[i, :src_len], tgt_out[i, :tgt_out_len]])
 
-        # [BOS, 5, 9, END_IN, PAD]
-        src[i, 0] = BOS
-        src[i, 1:content_len + 1] = content[i, :content_len].clone()
-        src[i, content_len + 1] = END_IN
+        # Input is the full sequence, target is shifted
+        lm_input[i, :len(full_seq)] = full_seq
 
-        # [BOS, 5, 9, END_OUT, PAD]
-        tgt_in[i, :] = src[i, :].clone()
-        tgt_in[i, content_len + 1] = END_OUT
+    return lm_input
 
-    # [5, 9, END_OUT, PAD, PAD]
-    tgt_out[:, :-1] = tgt_in[:, 1:].clone()
+class LMSampleGenerator:
+    def generate(self, batch_size: int) -> torch.Tensor:
+        raise NotImplementedError()
 
-    return src, tgt_in, tgt_out
-
-def max_allowed_separator(seq_len):
-    # [num, SEP, [num, SEP] * N, num]
-    # 1: [num] -> 0
-    # 2: [num, num] -> 0
-    # 3: [num, SEP, num] -> 1
-    # 4: [num, SEP, num, num] -> 1
-    # 5: [num, SEP, num, SEP, num] -> 2
-    # 6: [num, SEP, num, SEP, num, num] -> 2
-    # 7: [num, SEP, num, SEP, num, SEP, num] -> 3
-    if seq_len <= 2:
-        return 0
-    return 1 + (seq_len - 3) // 2
-
-def generate_take_last_samples(batch_size, max_seq_len, vocab_size, min_separators: int | None = None, max_separators: int | None = None):
-    '''
-    Generate samples of form:
-    Src:        [BOS, (TOKEN_1, TOKEN_2, ..., SEP) * n, TOKEN_X, ..., TOKEN_N, END_IN,  PAD, ..., PAD]
-    Tgt_in:     [BOS, TOKEN_X, ...,     TOKEN_N, PAD, ..., PAD]
-    Tgt_out:    [TOKEN_X, ..., TOKEN_N, END_OUT, PAD, ..., PAD]
-    '''
-
-    assert vocab_size > FIRST_TOKEN, "vocab_size must be > FIRST_TOKEN, so we have enough room for special tokens"
-    assert max_seq_len >= 2, "seq_len must be at least 2 to fit BOS and END_IN"
-
-    # max_seq_len == 7
-    # max_content_len == 5
-    max_content_len = max_seq_len - 2  # exclude BOS and END_IN
-
-    # max_separator == 2
-    if max_separators is None:
-        max_separators = max_allowed_separator(max_content_len)
-    assert max_allowed_separator(max_content_len) >= max_separators, "max_separators is more than that allowed by seq_len"
-    if min_separators is None:
-        min_separators = 0
-    assert min_separators >= 0 and min_separators <= max_separators
-
-    # content == [7, 6, 5, 8, 9]
-    content = torch.randint(FIRST_TOKEN, vocab_size, (batch_size, max_content_len)) # real content expect for BOS and END_IN
-
-    src = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
-    tgt_in = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
-    tgt_out = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
-
-    # Insert separators in random places (not consecutive)
-    for i in range(batch_size):
-        # content_len == 3
-        content_len = random.randint(1, max_content_len)
-
-        # num_separators == 1
-        max_sep_for_content = min(max_separators, max_allowed_separator(content_len))
-        min_sep_for_content = min(min_separators, max_sep_for_content)
-        proposed_num_separators = random.randint(min_sep_for_content, max_sep_for_content)  # Random number of separators
-
-        # Choose valid positions (exclude 0 and N-1)
-        # valid_positions == [1]
-        valid_positions = list(range(1, content_len - 1))
-
-        # To avoid consecutive separators, pick with spacing
-        # chosen: {1}
-        chosen = set()
-        while len(chosen) < proposed_num_separators and len(valid_positions) > 0:
-            pos = random.choice(valid_positions)
-            chosen.add(pos)
-            # ensure no neighbor will be chosen
-            valid_positions.remove(pos)
-            if pos-1 in valid_positions:
-                valid_positions.remove(pos-1)
-            if pos+1 in valid_positions:
-                valid_positions.remove(pos+1)
-
-        # Replace with separator
-        # content[i, :]: [7, SEP, 5, 8, 9]
-        for pos in chosen:
-            content[i, pos] = SEP
+    def pretty_to_str(self, sample: torch.Tensor) -> str:
+        return str(sample.tolist())
+    
+    def get_lm_output(self, lm_input: torch.Tensor) -> torch.Tensor:
+        '''
+        Given lm_input of shape [B, T], return lm_output of shape [B, T]
+        '''
+        B, T = lm_input.size()
+        lm_output = torch.full((B, T), PAD, dtype=torch.long, device=lm_input.device)
         
-        # last_sep_pos == 1
-        last_sep_pos = max(chosen) if len(chosen) > 0 else -1
-        # len_last_part == 1
-        len_last_part = int(content_len - last_sep_pos - 1)
+        lm_output[:, :-1] = lm_input[:, 1:].clone()
 
-        # [BOS, 7, SEP, 5, END_IN, PAD, PAD]
-        src[i, 0] = BOS
-        src[i, 1:content_len + 1] = content[i, :content_len].clone()
-        src[i, content_len + 1] = END_IN
+        return lm_output
 
-        # [BOS, 5, END_OUT, PAD, PAD, PAD, PAD]
-        tgt_in[i, 0] = BOS
-        tgt_in[i, 1:len_last_part + 1] = content[i, last_sep_pos+1:last_sep_pos+1+len_last_part].clone()
-        tgt_in[i, len_last_part + 1] = END_OUT
+class CountingSampleGenerator(LMSampleGenerator):
+    def __init__(self, min_digits: int, max_digits: int, min_count: int, max_count: int):
+        self.min_digits = min_digits
+        self.max_digits = max_digits
+        self.min_count = min_count
+        self.max_count = max_count
 
-    # [5, END_OUT, PAD, PAD, PAD, PAD, PAD]
-    tgt_out[:, :-1] = tgt_in[:, 1:].clone()
+    def generate(self, batch_size: int) -> torch.Tensor:
+        samples = self.generate_counting_samples(batch_size, self.min_digits, self.max_digits, self.min_count, self.max_count)
+        return samples
 
-    return src, tgt_in, tgt_out
+    def pretty_to_str(self, sample: torch.Tensor) -> str:
+        token_to_str = {
+            PAD: "",
+            BOS: "",
+            END_IN: "<END_IN>",
+            END_OUT: "<END_OUT>",
+            SEP: ","
+        }
+        s = []
+        for token in sample:
+            token_int = int(token.item())
+            if token_int in token_to_str:
+                s.append(token_to_str[token_int])
+            else:
+                s.append(str(token_int - FIRST_TOKEN))
+        return " ".join(s)
+
+    @property
+    def vocab_size(self):
+        return FIRST_TOKEN + 9  # digits 0-9
+
+    @staticmethod
+    def generate_counting_samples(batch_size: int, min_digits: int, max_digits: int, min_count: int, max_count: int) -> torch.Tensor:
+        '''
+        Generate counting samples:
+        [BOS, "9", SEP, "1", "0", SEP, "1", "1", END_IN, "1", "2", SEP, "1", "3", END_OUT, PAD, ..., PAD]
+        '''
+        assert min_digits > 0, "min_digits must be > 0"
+        assert max_digits > 0, "max_digits must be > 0"
+        assert max_digits >= min_digits, "max_digits must be >= min_digits"
+        assert min_count > 1, "min_count must be > 1"
+        assert max_count > 1, "max_count must be > 1"
+        assert max_count >= min_count, "max_count must be >= min_count"
+
+        max_seq_len = 1 + max_digits * max_count + (max_count - 1) + 2  # BOS + n * digits + (n-1) * SEP + END_IN + END_OUT
+
+        samples = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
+
+        for i in range(batch_size):
+            sample = [BOS]
+            n_num = random.randint(min_count, max_count)  # count of numbers to generate
+            n_input = n_num - 1  # count of numbers as input, only output one more number for now
+
+            for j in range(n_num):
+                if j == 0:
+                    min_x = 0 if min_digits == 1 else 10 ** (min_digits - 1)
+                    x = random.randint(min_x, 10 ** max_digits - n_num)  # ensure we have enough room to count up
+                else:
+                    x = x + 1
+                digits = [int(d) for d in str(x)]
+                tokens = [d + FIRST_TOKEN for d in digits]  # shift to token ids
+                sample.extend(tokens)
+                if j < n_num - 1:
+                    if j == n_input - 1:
+                        sample.append(END_IN)
+                    else:
+                        sample.append(SEP)
+                else:
+                    sample.append(END_OUT)
+            if len(sample) > max_seq_len:
+                breakpoint()
+            samples[i, :len(sample)] = torch.tensor(sample, dtype=torch.long)
+
+        return samples
+
+
+
+class CopySampleGenerator(LMSampleGenerator):
+    def __init__(self, max_seq_len: int, vocab_size: int):
+        assert vocab_size > FIRST_TOKEN, "vocab_size must be > FIRST_TOKEN, so we have enough room for special tokens"
+        assert max_seq_len >= 2, "seq_len must be at least 2 to fit BOS and END_IN"
+        self.max_seq_len = max_seq_len
+        self.vocab_size = vocab_size
+
+    def generate(self, batch_size: int) -> torch.Tensor:
+        src, _, tgt_out = self.generate_copy_samples(batch_size, self.max_seq_len, self.vocab_size)
+        lm_input = convert_seq2seq_samples_to_lm_sample(src, tgt_out, pad_token=PAD)
+        return lm_input
+
+    @staticmethod
+    def generate_copy_samples(batch_size, max_seq_len, vocab_size):
+        """
+        Generate samples of form:
+        Src:        [BOS,       TOKEN 1, TOKEN 2, ..., TOKEN N, END_IN,     PAD 1, ..., PAD M]
+        Tgt_in:     [BOS,       TOKEN 1, TOKEN 2, ..., TOKEN N, END_OUT,    PAD 1, ..., PAD M]
+        Tgt_out:    [TOKEN 1,   TOKEN 2, TOKEN 3, ..., END_OUT, PAD 1,      PAD 2, ..., PAD M+1]
+        """
+        assert vocab_size > FIRST_TOKEN, "vocab_size must be > FIRST_TOKEN, so we have enough room for special tokens"
+        assert max_seq_len >= 2, "seq_len must be at least 2 to fit BOS and END_IN"
+
+        # max_seq_len == 5
+        # max_content_len == 3
+        max_content_len = max_seq_len - 2  # exclude BOS and END_IN
+
+        # [5, 9, 7]
+        content = torch.randint(FIRST_TOKEN, vocab_size, (batch_size, max_content_len))
+
+        src = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
+        tgt_in = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
+        tgt_out = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
+        for i in range(batch_size):
+            # content_len == 2
+            content_len = random.randint(1, max_content_len) # make sure the sequence is non-empty (not just BOS and END)
+
+            # [BOS, 5, 9, END_IN, PAD]
+            src[i, 0] = BOS
+            src[i, 1:content_len + 1] = content[i, :content_len].clone()
+            src[i, content_len + 1] = END_IN
+
+            # [BOS, 5, 9, END_OUT, PAD]
+            tgt_in[i, :] = src[i, :].clone()
+            tgt_in[i, content_len + 1] = END_OUT
+
+        # [5, 9, END_OUT, PAD, PAD]
+        tgt_out[:, :-1] = tgt_in[:, 1:].clone()
+
+        return src, tgt_in, tgt_out
+
+class TakeLastSampleGenerator(LMSampleGenerator):
+    def __init__(self, max_seq_len: int, vocab_size: int, min_separators: int | None = None, max_separators: int | None = None):
+        assert vocab_size > FIRST_TOKEN, "vocab_size must be > FIRST_TOKEN, so we have enough room for special tokens"
+        assert max_seq_len >= 2, "seq_len must be at least 2 to fit BOS and END_IN"
+        self.max_seq_len = max_seq_len
+        self.vocab_size = vocab_size
+        self.min_separators = min_separators
+        self.max_separators = max_separators
+
+    def generate(self, batch_size: int) -> torch.Tensor:
+        src, _, tgt_out = self.generate_take_last_samples(batch_size, self.max_seq_len, self.vocab_size, self.min_separators, self.max_separators)
+        lm_input = convert_seq2seq_samples_to_lm_sample(src, tgt_out, pad_token=PAD)
+        return lm_input
+
+    @classmethod
+    def max_allowed_separator(cls, seq_len):
+        # [num, SEP, [num, SEP] * N, num]
+        # 1: [num] -> 0
+        # 2: [num, num] -> 0
+        # 3: [num, SEP, num] -> 1
+        # 4: [num, SEP, num, num] -> 1
+        # 5: [num, SEP, num, SEP, num] -> 2
+        # 6: [num, SEP, num, SEP, num, num] -> 2
+        # 7: [num, SEP, num, SEP, num, SEP, num] -> 3
+        if seq_len <= 2:
+            return 0
+        return 1 + (seq_len - 3) // 2
+
+    @classmethod
+    def generate_take_last_samples(cls, batch_size, max_seq_len, vocab_size, min_separators: int | None = None, max_separators: int | None = None):
+        '''
+        Generate samples of form:
+        Src:        [BOS, (TOKEN_1, TOKEN_2, ..., SEP) * n, TOKEN_X, ..., TOKEN_N, END_IN,  PAD, ..., PAD]
+        Tgt_in:     [BOS, TOKEN_X, ...,     TOKEN_N, PAD, ..., PAD]
+        Tgt_out:    [TOKEN_X, ..., TOKEN_N, END_OUT, PAD, ..., PAD]
+        '''
+
+        assert vocab_size > FIRST_TOKEN, "vocab_size must be > FIRST_TOKEN, so we have enough room for special tokens"
+        assert max_seq_len >= 2, "seq_len must be at least 2 to fit BOS and END_IN"
+
+        # max_seq_len == 7
+        # max_content_len == 5
+        max_content_len = max_seq_len - 2  # exclude BOS and END_IN
+
+        # max_separator == 2
+        if max_separators is None:
+            max_separators = cls.max_allowed_separator(max_content_len)
+        assert cls.max_allowed_separator(max_content_len) >= max_separators, "max_separators is more than that allowed by seq_len"
+        if min_separators is None:
+            min_separators = 0
+        assert min_separators >= 0 and min_separators <= max_separators
+
+        # content == [7, 6, 5, 8, 9]
+        content = torch.randint(FIRST_TOKEN, vocab_size, (batch_size, max_content_len)) # real content expect for BOS and END_IN
+
+        src = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
+        tgt_in = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
+        tgt_out = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
+
+        # Insert separators in random places (not consecutive)
+        for i in range(batch_size):
+            # content_len == 3
+            content_len = random.randint(1, max_content_len)
+
+            # num_separators == 1
+            max_sep_for_content = min(max_separators, cls.max_allowed_separator(content_len))
+            min_sep_for_content = min(min_separators, max_sep_for_content)
+            proposed_num_separators = random.randint(min_sep_for_content, max_sep_for_content)  # Random number of separators
+
+            # Choose valid positions (exclude 0 and N-1)
+            # valid_positions == [1]
+            valid_positions = list(range(1, content_len - 1))
+
+            # To avoid consecutive separators, pick with spacing
+            # chosen: {1}
+            chosen = set()
+            while len(chosen) < proposed_num_separators and len(valid_positions) > 0:
+                pos = random.choice(valid_positions)
+                chosen.add(pos)
+                # ensure no neighbor will be chosen
+                valid_positions.remove(pos)
+                if pos-1 in valid_positions:
+                    valid_positions.remove(pos-1)
+                if pos+1 in valid_positions:
+                    valid_positions.remove(pos+1)
+
+            # Replace with separator
+            # content[i, :]: [7, SEP, 5, 8, 9]
+            for pos in chosen:
+                content[i, pos] = SEP
+            
+            # last_sep_pos == 1
+            last_sep_pos = max(chosen) if len(chosen) > 0 else -1
+            # len_last_part == 1
+            len_last_part = int(content_len - last_sep_pos - 1)
+
+            # [BOS, 7, SEP, 5, END_IN, PAD, PAD]
+            src[i, 0] = BOS
+            src[i, 1:content_len + 1] = content[i, :content_len].clone()
+            src[i, content_len + 1] = END_IN
+
+            # [BOS, 5, END_OUT, PAD, PAD, PAD, PAD]
+            tgt_in[i, 0] = BOS
+            tgt_in[i, 1:len_last_part + 1] = content[i, last_sep_pos+1:last_sep_pos+1+len_last_part].clone()
+            tgt_in[i, len_last_part + 1] = END_OUT
+
+        # [5, END_OUT, PAD, PAD, PAD, PAD, PAD]
+        tgt_out[:, :-1] = tgt_in[:, 1:].clone()
+
+        return src, tgt_in, tgt_out
 
 ##############################################
 # NN Model Definition
@@ -424,81 +571,93 @@ def debug_model(model, test_lm_input):
     greedy_decode(model, bad_sample)
     DEBUG_GROUND_TRUTH = None
 
-def convert_to_lm_input_output(src, tgt_out, pad_token=PAD):
-    B, T = src.size()
-    device = src.device
-
-    lm_input = torch.full((B, T + tgt_out.shape[1]), pad_token, dtype=torch.long, device=device)
-    lm_target = torch.full((B, T + tgt_out.shape[1]), pad_token, dtype=torch.long, device=device)
-
-    for i in range(B):
-        # Find where src ends (at END_IN) and tgt_out ends (at END_OUT)
-        src_len = (src[i] != pad_token).sum().item()
-        tgt_out_len = (tgt_out[i] != pad_token).sum().item()
-
-        # Concatenate src and the content of tgt_out (tgt_out thus no BOS after END_IN)
-        # [BOS, ..., END_IN, ..., END_OUT]
-        full_seq = torch.cat([src[i, :src_len], tgt_out[i, :tgt_out_len]])
-
-        # Input is the full sequence, target is shifted
-        lm_input[i, :len(full_seq)] = full_seq
-        lm_target[i, :len(full_seq)-1] = full_seq[1:]
-
-    return lm_input, lm_target
 
 def train():
-    vocab_size = 30
-    d_model = 16
-    max_seq_len = 24
-    max_separators = 2
-    batch_size = 128
-    num_steps = 10000
-    lr = 1e-3
-    model_type = "copy" # "copy" or "take_last"
-
-    n_head = 1          # Number of attention heads
-    num_layers = 1      # Number of transformer layers (THIS IS THE DEPTH)
-
-    # model_save_dir = f"./ptrGen_{model_type}_v{vocab_size}_d{d_model}_l{max_seq_len}"
-    model_save_dir = f"./tfBlock4Content_tfHead{n_head}_tfLayer{num_layers}_contentAndAbsPosAttn_{model_type}_v{vocab_size}_d{d_model}_l{max_seq_len}"
-
-    use_saved_model = True
-    debug = False
-
     # fix seeds
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
     random.seed(42)
 
-    def gen_samples(n):
-        if model_type == "copy":
-            return generate_copy_samples(n, max_seq_len, vocab_size)
-        else:
-            return generate_take_last_samples(n, max_seq_len, vocab_size,  max_separators=max_separators)
+    task_type = "take_last" # "copy" or "take_last" or "counting"
+    model_type = "ptrGen" # "ptrGen" or "tfPtrGen" or "tf"
 
-    # device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = "cpu"
+    # training
+    batch_size = 128
+    num_steps = 10000
+    lr = 1e-3
+    use_saved_model = True
+    debug = False
+    device = "cpu" # device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
-    model_max_context_size = max_seq_len * 2
-
-    # possible models:
-    # model = PointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size).to(device)
-    model = TransformerPointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size, n_head=n_head, num_layers=num_layers).to(device)
-    # model = TransformerLM(vocab_size, d_model, max_context_size=model_max_context_size, n_heads=n_head, n_layer=num_layers, head_size=None, ff_hidden_size=None).to(device)
-
+    # tasks
+    sample_generator: LMSampleGenerator
+    if task_type == "copy":
+        vocab_size = 15
+        max_seq_len = 24
+        sample_generator = CopySampleGenerator(max_seq_len, vocab_size)
+        model_max_context_size = max_seq_len * 2 # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
+        task_prefix = f"maxSeq{max_seq_len}"
+    elif task_type == "take_last":
+        vocab_size = 15
+        max_seq_len = 24
+        max_separators = 3
+        sample_generator = TakeLastSampleGenerator(max_seq_len, vocab_size, max_separators=max_separators)
+        model_max_context_size = max_seq_len * 2 # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
+        task_prefix = f"maxSeq{max_seq_len}_maxSep{max_separators}"
+    elif task_type == "counting":
+        max_seq_len = 24
+        min_digits = 1
+        max_digits = 3
+        min_count = 2
+        max_count = 5
+        sample_generator = CountingSampleGenerator(min_digits, max_digits, min_count, max_count)
+        vocab_size = sample_generator.vocab_size
+        model_max_context_size = 1 + max_digits * max_count + (max_count - 1) + 2
+        task_prefix = f"minD{min_digits}_maxD{max_digits}_minC{min_count}_maxC{max_count}"
+    else:
+        raise ValueError("Unknown task_type")
+    
+    # models
+    if model_type == "ptrGen":
+        d_model = 64
+        model = PointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size).to(device)
+        model_prefix = f"ptrGen"
+    elif model_type == "tfPtrGen":
+        d_model = 64
+        n_head = 4
+        num_layers = 1
+        model = TransformerPointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size, n_head=n_head, num_layers=num_layers).to(device)
+        model_prefix = f"tfPtrGen_tfHead{n_head}_tfLayer{num_layers}"
+    elif model_type == "tf":
+        d_model = 64
+        n_head = 4
+        num_layers = 1
+        model = TransformerLM(vocab_size, d_model, max_context_size=model_max_context_size, n_heads=n_head, n_layer=num_layers, head_size=None, ff_hidden_size=None).to(device)
+        model_prefix = f"tf_tfHead{n_head}_tfLayer{num_layers}"
+    else:
+        raise ValueError("Unknown model_type")
+    
     # print model parameter count
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model Parameter Count: {num_params}")
 
-    # find max step model
+    model_save_dir = f"./simplellm/lm/saved_models/{task_type}/{task_prefix}/{model_prefix}_vocab{vocab_size}_dModel{d_model}_maxCtx{model_max_context_size}_params{num_params}"
+
+    # copy this file to model save dir for record
+    if not os.path.exists(model_save_dir):
+        os.makedirs(model_save_dir)
+    training_timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    script_name = training_timestamp + "_" + os.path.basename(__file__)
+    shutil.copy(__file__, os.path.join(model_save_dir, script_name))
+
+    # find and load max step model
     max_step = 0
     if use_saved_model:
         saved_models = os.listdir(model_save_dir) if os.path.exists(model_save_dir) else []
         path = None
         for fn in saved_models:
             if fn.endswith(".pt"):
-                parts = fn.split("step")
+                parts = fn.split("step_")
                 step = int(parts[1].split(".")[0])
                 if step > max_step:
                     max_step = step
@@ -507,15 +666,12 @@ def train():
             model.load_state_dict(torch.load(path, map_location=device))
             print("Loaded saved model from", path)
 
-
-
+    # optimizer and loss
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss(ignore_index=0)
 
-    test_src, _, test_tgt_out = gen_samples(batch_size * 10)
-    test_src = test_src.to(device)
-    test_tgt_out = test_tgt_out.to(device)
-    test_lm_input, _ = convert_to_lm_input_output(test_src, test_tgt_out, pad_token=PAD)
+    # validation set
+    test_lm_input = sample_generator.generate(batch_size * 10)
 
     # debug model for any bad samples
     if debug:
@@ -525,23 +681,21 @@ def train():
         model.train()
 
     for step in range(max_step + 1, num_steps+1):
-        src, _, tgt_out = gen_samples(batch_size)
-        src, tgt_out = src.to(device), tgt_out.to(device)
-
-        lm_input, lm_target = convert_to_lm_input_output(src, tgt_out, pad_token=PAD)
+        lm_input = sample_generator.generate(batch_size)
+        lm_output = sample_generator.get_lm_output(lm_input)
 
         P_final = model(lm_input)   # [B, T, V]
 
-        loss = criterion(P_final.reshape(-1, vocab_size), lm_target.reshape(-1))
+        loss = criterion(P_final.reshape(-1, vocab_size), lm_output.reshape(-1))
 
         opt.zero_grad()
         loss.backward()
         opt.step()
 
-        # # decrease lr after half the steps
-        # if step > num_steps // 2:
-        #     for param_group in opt.param_groups:
-        #         param_group['lr'] = lr * 0.1
+        # decrease lr after half the steps
+        if step > num_steps // 2:
+            for param_group in opt.param_groups:
+                param_group['lr'] = lr * 0.1
 
         if step % 200 == 0:
             print(f"Step {step}, Loss={loss.item():.4f}")
@@ -555,8 +709,8 @@ def train():
                 good_idx = good.nonzero(as_tuple=True)[0]
                 for i in range(min(3, len(good_idx))):
                     print(f"Good Sample {i}:")
-                    print("Sample:", test_lm_input[good_idx[i],:])
-                    print("Output:", pred[good_idx[i],:])
+                    print("Sample:", sample_generator.pretty_to_str(test_lm_input[good_idx[i],:]))
+                    print("Output:", sample_generator.pretty_to_str(pred[good_idx[i],:]))
                     print()
 
                 # show 3 bad samples:
@@ -564,8 +718,8 @@ def train():
                 bad_idx = bad.nonzero(as_tuple=True)[0]
                 for i in range(min(3, len(bad_idx))):
                     print(f"Bad Sample {i}:")
-                    print("Sample:", test_lm_input[bad_idx[i],:])
-                    print("Output:", pred[bad_idx[i],:])
+                    print("Sample:", sample_generator.pretty_to_str(test_lm_input[bad_idx[i],:]))
+                    print("Output:", sample_generator.pretty_to_str(pred[bad_idx[i],:]))
                     print()
 
                 # print test accuracy
@@ -581,7 +735,7 @@ def train():
             if not os.path.exists(model_save_dir):
                 os.makedirs(model_save_dir)
             acc_floor = int(acc * 100)
-            path = os.path.join(model_save_dir, f"acc_{acc_floor}_step{step}.pt")
+            path = os.path.join(model_save_dir, f"{training_timestamp}_acc_{acc_floor}_step_{step}.pt")
             torch.save(model.state_dict(), path)
             print("Saved model to", path)
 
