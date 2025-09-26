@@ -427,8 +427,7 @@ class TransformerPointerGeneratorLM(nn.Module):
         # Auto-regressive core: unidirectional GRU
         self.gru = nn.GRU(d_model, d_model, batch_first=True)
 
-        assert num_layers == 1, "Currently only support 1 transformer layer"
-        self.tf_block = TransformerBlock(max_context_size=max_len, embed_size=d_model, n_heads=n_head, head_size=None, ff_hidden_size=None)
+        self.tf_blocks = nn.Sequential(*[TransformerBlock(max_len, d_model, n_heads=n_head, head_size=None, ff_hidden_size=None) for _ in range(num_layers)])
 
         # Generator projection: takes [transformer state + attention wavg context]
         self.gen_proj = nn.Linear(d_model * 2, vocab_size)
@@ -447,7 +446,7 @@ class TransformerPointerGeneratorLM(nn.Module):
         gru_out, _ = self.gru(x_emb)  # [B, S, D]
 
         # transformer reasoning block
-        transformer_out = self.tf_block(gru_out)  # [B, S, D]
+        transformer_out = self.tf_blocks(gru_out)  # [B, S, D]
 
         # Use transformer_out as the basis for pointer generation, as both Q and K
         Q_ptr = transformer_out
@@ -619,19 +618,19 @@ def train():
     
     # models
     if model_type == "ptrGen":
-        d_model = 64
+        d_model = 32
         model = PointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size).to(device)
         model_prefix = f"ptrGen"
     elif model_type == "tfPtrGen":
-        d_model = 64
-        n_head = 4
+        d_model = 32
+        n_head = 2
         num_layers = 1
         model = TransformerPointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size, n_head=n_head, num_layers=num_layers).to(device)
         model_prefix = f"tfPtrGen_tfHead{n_head}_tfLayer{num_layers}"
     elif model_type == "tf":
-        d_model = 64
-        n_head = 4
-        num_layers = 1
+        d_model = 32
+        n_head = 2
+        num_layers = 3
         model = TransformerLM(vocab_size, d_model, max_context_size=model_max_context_size, n_heads=n_head, n_layer=num_layers, head_size=None, ff_hidden_size=None).to(device)
         model_prefix = f"tf_tfHead{n_head}_tfLayer{num_layers}"
     else:
@@ -680,6 +679,16 @@ def train():
             debug_model(model, test_lm_input)
         model.train()
 
+    # LR scheduler: step down LR by 10x when validation acc > 90%
+    # validation_acc = 0.0
+    # lr_stepped_down = False
+
+    print("Starting training...")
+    print("------------------------------------")
+
+    min_loss = float('inf')
+    max_validation_acc = 0.0
+
     for step in range(max_step + 1, num_steps+1):
         lm_input = sample_generator.generate(batch_size)
         lm_output = sample_generator.get_lm_output(lm_input)
@@ -692,14 +701,15 @@ def train():
         loss.backward()
         opt.step()
 
-        # decrease lr after half the steps
-        if step > num_steps // 2:
-            for param_group in opt.param_groups:
-                param_group['lr'] = lr * 0.1
+        min_loss = min(min_loss, loss.item())
+
+        # if validation_acc > 0.95 and not lr_stepped_down:
+        #     for param_group in opt.param_groups:
+        #         param_group['lr'] = lr * 0.1
+        #     lr_stepped_down = True
+        #     print("Stepped down learning rate to", param_group['lr'])
 
         if step % 200 == 0:
-            print(f"Step {step}, Loss={loss.item():.4f}")
-
             model.eval()
             with torch.no_grad():
                 pred = greedy_decode(model, test_lm_input)
@@ -723,21 +733,29 @@ def train():
                     print()
 
                 # print test accuracy
-                acc = good.float().mean().item()
-                print(f"Test Accuracy: {acc:.4f}")
-
-                print("------------------------------------")
-                print("")
+                validation_acc = good.float().mean().item()
+                print(f"Validation Accuracy: Prev Max = {max_validation_acc:.4f}, Curr = {validation_acc:.4f}")
+                max_validation_acc = max(max_validation_acc, validation_acc)
 
             model.train()
 
-            # save model
-            if not os.path.exists(model_save_dir):
-                os.makedirs(model_save_dir)
-            acc_floor = int(acc * 100)
-            path = os.path.join(model_save_dir, f"{training_timestamp}_acc_{acc_floor}_step_{step}.pt")
+            print(f"Step {step}, Loss: Prev Min = {min_loss:.4f}, Curr = {loss.item():.4f}")
+
+            # save model           
+            path = os.path.join(model_save_dir, f"{training_timestamp}_step_{step}.pt")
             torch.save(model.state_dict(), path)
             print("Saved model to", path)
+
+            # performance
+            perf_path = os.path.join(model_save_dir, "training_performance.txt")
+            if not os.path.exists(perf_path):
+                with open(perf_path, "w") as f:
+                    f.write("TrainStartTime\tStep\tLoss\tMinLoss\tValAcc\tMaxValAcc\n")
+            with open(perf_path, "a") as f:
+                f.write(f"{training_timestamp}\t{step}\t{loss.item():.4f}\t{min_loss:.4f}\t{validation_acc:.4f}\t{max_validation_acc:.4f}\n")
+
+            print("------------------------------------")
+            print("")
 
 if __name__ == "__main__":
     train()
