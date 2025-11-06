@@ -91,7 +91,7 @@ class CountingSampleGenerator(LMSampleGenerator):
 
     @property
     def vocab_size(self):
-        return FIRST_TOKEN + 9  # digits 0-9
+        return FIRST_TOKEN + 10  # digits 0-9
 
     @staticmethod
     def generate_counting_samples(batch_size: int, min_digits: int, max_digits: int, min_count: int, max_count: int) -> torch.Tensor:
@@ -347,51 +347,60 @@ class PointerGeneratorLM(nn.Module):
         self.gru = nn.GRU(d_model, d_model, batch_first=True)
 
         # Attention (self-attention)
-        self.W_q = nn.Linear(d_model, d_model, bias=False) # query (from GRU state)
-        self.W_k = nn.Linear(d_model, d_model, bias=False)  # key (from GRU states)
+        self.W_q = nn.Linear(2 * d_model, 2 * d_model, bias=False) # query (from GRU state and raw input embedding)
+        self.W_k = nn.Linear(2 * d_model, 2 * d_model, bias=False)  # key (from GRU states and raw input embedding)
+        self.W_qp = nn.Linear(2 * d_model, d_model, bias=False) # query for abs pos (from GRU states and raw input embedding)
 
-        # Generator projection: takes [GRU state + context]
-        self.gen_proj = nn.Linear(d_model * 2, vocab_size)
+        # Generator projection: takes [GRU state + context (prob weighted avg of (GRU state + raw input embedding))]
+        self.gen_proj = nn.Linear(d_model * 3, vocab_size)
 
-        # Gate now depends on [GRU state + context]
-        self.gate = nn.Linear(d_model * 2, 1)
+        # Gate now depends on [GRU state + context (prob weighted avg of (GRU state + raw input embedding))]
+        self.gate = nn.Linear(d_model * 3, 1)
 
     def forward(self, x):
         B, S = x.size()
 
         # Embed input
-        pos_ids = torch.arange(S, device=x.device).unsqueeze(0).expand(B, -1)
-        x_emb = self.token_embed(x) + self.pos_embed(pos_ids)
+        x_emb = self.token_embed(x)
         
         # Process with GRU. The output is already causal.
         gru_out, _ = self.gru(x_emb)  # [B, S, D]
 
         # Causal Self-Attention
-        Q = self.W_q(gru_out)               # [B, S, D]
-        K = self.W_k(gru_out)               # [B, S, D]
+        attention_input = torch.cat([gru_out, x_emb], dim=-1)  # [B, S, 2*D]
+        Q = self.W_q(attention_input)               # [B, S, 2*D]
+        K = self.W_k(attention_input)               # [B, S, 2*D]
 
         # Apply RoPE to Q and K
-        sin, cos = build_rope_sin_cos(S, self.D, device=x.device) # [S, D]
+        sin, cos = build_rope_sin_cos(S, 2 * self.D, device=x.device) # [S, 2*D]
         Q = apply_rotary_pos_emb(Q, sin, cos)
         K = apply_rotary_pos_emb(K, sin, cos)
 
-        attn_scores = torch.bmm(Q, K.transpose(1,2)) / (Q.size(-1)**0.5)
+        content_scores = torch.bmm(Q, K.transpose(1,2)) # [B, S, S]
+
+        # absolute position based attention score
+        key_abs_pos_ids = torch.arange(S, device=x.device).unsqueeze(0).repeat(B, 1) # [B, S]
+        abs_pos_embeddings = self.pos_embed(key_abs_pos_ids) # [B, S, D]
+        Q_pos = self.W_qp(attention_input)               # [B, S, D]
+        abs_pos_scores = torch.bmm(Q_pos, abs_pos_embeddings.transpose(1, 2))
+
+        # Combine content and absolute position scores for pointer-generation
+        pointer_scores = (content_scores + abs_pos_scores) / (Q.size(-1)**0.5)
 
         # Apply causal mask to prevent attending to future positions
         mask = torch.triu(torch.ones(S, S, device=x.device), diagonal=1).bool()
-        attn_scores = attn_scores.masked_fill(mask, -torch.inf)
-        
-        pos_probs = F.softmax(attn_scores, dim=-1)      # [B, S, S]
+        pointer_logits = pointer_scores.masked_fill(mask, -torch.inf)
+        pos_probs = F.softmax(pointer_logits, dim=-1) # [B, S, S]
 
         # Copy distribution for each token is the sum of pos_probs for all of its occurrences in the source history
         x_one_hot = F.one_hot(x, num_classes=self.vocab_size).float()  # [B, S, V]
         P_copy = torch.bmm(pos_probs, x_one_hot)       # [B, S, V]
 
         # Compute attention-weighted context vector
-        context = torch.bmm(pos_probs, gru_out)         # [B, S, D]
+        context = torch.bmm(pos_probs, attention_input)         # [B, S, 2 * D]
 
         # Combine GRU state with context for generation and gating
-        combined = torch.cat([gru_out, context], dim=-1)  # [B, S, 2*D]
+        combined = torch.cat([gru_out, context], dim=-1)  # [B, S, 3*D]
 
         # Context-aware generator (non-copy/generate new token) distribution
         P_gen = F.softmax(self.gen_proj(combined), dim=-1)  # [B, S, V]
@@ -502,6 +511,13 @@ class TransformerPointerGeneratorLM(nn.Module):
 
         return P_final   # [B, S, V]
 
+class WrappedTransformerLM(TransformerLM):
+    def forward(self, x):
+        # x: [B, S]
+        logits = super().forward(x)  # [B, S, V]
+        P_final = F.softmax(logits, dim=-1)  # [B, S, V]
+        return P_final
+
 # ============================================================
 # Greedy Decoding
 # ============================================================
@@ -577,14 +593,15 @@ def train():
     torch.cuda.manual_seed_all(42)
     random.seed(42)
 
-    task_type = "take_last" # "copy" or "take_last" or "counting"
+    task_type = "copy" # "copy" or "take_last" or "counting"
     model_type = "ptrGen" # "ptrGen" or "tfPtrGen" or "tf"
 
     # training
     batch_size = 128
     num_steps = 10000
     lr = 1e-3
-    use_saved_model = True
+    use_saved_model = False
+    save_model = True
     debug = False
     device = "cpu" # device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -620,7 +637,7 @@ def train():
     if model_type == "ptrGen":
         d_model = 32
         model = PointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size).to(device)
-        model_prefix = f"ptrGen"
+        model_prefix = f"ptrGen_rawInputPassThrough_posAttn"
     elif model_type == "tfPtrGen":
         d_model = 32
         n_head = 2
@@ -628,10 +645,10 @@ def train():
         model = TransformerPointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size, n_head=n_head, num_layers=num_layers).to(device)
         model_prefix = f"tfPtrGen_tfHead{n_head}_tfLayer{num_layers}"
     elif model_type == "tf":
-        d_model = 32
+        d_model =  24
         n_head = 2
         num_layers = 3
-        model = TransformerLM(vocab_size, d_model, max_context_size=model_max_context_size, n_heads=n_head, n_layer=num_layers, head_size=None, ff_hidden_size=None).to(device)
+        model = WrappedTransformerLM(vocab_size, d_model, max_context_size=model_max_context_size, n_heads=n_head, n_layer=num_layers, head_size=None, ff_hidden_size=None).to(device)
         model_prefix = f"tf_tfHead{n_head}_tfLayer{num_layers}"
     else:
         raise ValueError("Unknown model_type")
@@ -640,14 +657,23 @@ def train():
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model Parameter Count: {num_params}")
 
-    model_save_dir = f"./simplellm/lm/saved_models/{task_type}/{task_prefix}/{model_prefix}_vocab{vocab_size}_dModel{d_model}_maxCtx{model_max_context_size}_params{num_params}"
+    model_desc = f"{model_prefix}_vocab{vocab_size}_dModel{d_model}_maxCtx{model_max_context_size}_params{num_params}"
+    model_save_dir = f"./simplellm/lm/saved_models/{task_type}/{task_prefix}/{model_desc}"
+
+    if not use_saved_model and save_model:
+        if os.path.exists(model_save_dir):
+            # move to backup dir
+            backup_dir = model_save_dir + "_backup_" + datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+            shutil.move(model_save_dir, backup_dir)
+            print("Moved existing model dir to backup:", backup_dir)
 
     # copy this file to model save dir for record
-    if not os.path.exists(model_save_dir):
-        os.makedirs(model_save_dir)
-    training_timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    script_name = training_timestamp + "_" + os.path.basename(__file__)
-    shutil.copy(__file__, os.path.join(model_save_dir, script_name))
+    if save_model:
+        if not os.path.exists(model_save_dir):
+            os.makedirs(model_save_dir)
+        training_timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        script_name = training_timestamp + "_" + os.path.basename(__file__)
+        shutil.copy(__file__, os.path.join(model_save_dir, script_name))
 
     # find and load max step model
     max_step = 0
@@ -667,10 +693,24 @@ def train():
 
     # optimizer and loss
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.CrossEntropyLoss(ignore_index=0)
+    # use NLLLoss  when model output is probabilities, use CrossEntropyLoss when model output is logits
+    criterion = nn.NLLLoss(ignore_index=PAD)
 
     # validation set
     test_lm_input = sample_generator.generate(batch_size * 10)
+
+    if task_type == "counting":
+        has_special_sample = False
+        for i in range(len(test_lm_input)):
+            s = sample_generator.pretty_to_str(test_lm_input[i])
+            input_part = s.split("<END_IN>")[0]
+            output_part = s.split("<END_IN>")[1]
+            last_input_num = int(input_part.split(',')[-1].replace(' ', ''))
+            first_output_num = int(output_part.split(',')[0].replace(' ', '').replace('<END_OUT>', ''))
+            if len(str(last_input_num)) != len(str(first_output_num)):
+                print("Test Sample with different length output:", s)
+                has_special_sample = True
+        assert has_special_sample, "Test set should have at least one sample with different length output"
 
     # debug model for any bad samples
     if debug:
@@ -695,13 +735,14 @@ def train():
 
         P_final = model(lm_input)   # [B, T, V]
 
-        loss = criterion(P_final.reshape(-1, vocab_size), lm_output.reshape(-1))
+        # clamp for numerical stability and use NLL on log-probs
+        log_p = torch.log(P_final.clamp(min=1e-12))
+
+        loss = criterion(log_p.reshape(-1, vocab_size), lm_output.reshape(-1))
 
         opt.zero_grad()
         loss.backward()
         opt.step()
-
-        min_loss = min(min_loss, loss.item())
 
         # if validation_acc > 0.95 and not lr_stepped_down:
         #     for param_group in opt.param_groups:
@@ -740,22 +781,24 @@ def train():
             model.train()
 
             print(f"Step {step}, Loss: Prev Min = {min_loss:.4f}, Curr = {loss.item():.4f}")
+            min_loss = min(min_loss, loss.item())
 
-            # save model           
-            path = os.path.join(model_save_dir, f"{training_timestamp}_step_{step}.pt")
-            torch.save(model.state_dict(), path)
-            print("Saved model to", path)
+            if save_model:
+                path = os.path.join(model_save_dir, f"{training_timestamp}_step_{step}.pt")
+                torch.save(model.state_dict(), path)
+                print("Saved model to", path)
 
-            # performance
-            perf_path = os.path.join(model_save_dir, "training_performance.txt")
-            if not os.path.exists(perf_path):
-                with open(perf_path, "w") as f:
-                    f.write("TrainStartTime\tStep\tLoss\tMinLoss\tValAcc\tMaxValAcc\n")
-            with open(perf_path, "a") as f:
-                f.write(f"{training_timestamp}\t{step}\t{loss.item():.4f}\t{min_loss:.4f}\t{validation_acc:.4f}\t{max_validation_acc:.4f}\n")
+                # performance
+                perf_path = os.path.join(model_save_dir, f"{model_desc}_training_performance.txt")
+                if not os.path.exists(perf_path):
+                    with open(perf_path, "w") as f:
+                        f.write("TrainStartTime\tStep\tLoss\tMinLoss\tValAcc\tMaxValAcc\n")
+                with open(perf_path, "a") as f:
+                    f.write(f"{training_timestamp}\t{step}\t{loss.item():.4f}\t{min_loss:.4f}\t{validation_acc:.4f}\t{max_validation_acc:.4f}\n")
 
             print("------------------------------------")
             print("")
 
+# python -m simplellm.lm.copying_lm
 if __name__ == "__main__":
     train()
