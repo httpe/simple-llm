@@ -231,6 +231,40 @@ class GRUCell(nn.Module):
         return hidden
 
 
+class MyGRU(nn.Module):
+    """Single-layer GRU that mirrors nn.GRU using explicit GRUCell steps."""
+
+    def __init__(self, input_size: int, hidden_state_size: int):
+        super().__init__()
+
+        self.input_size = input_size # D
+        self.hidden_state_size = hidden_state_size # H
+
+        self.gru_cell = GRUCell(input_size, hidden_state_size)
+        self.init_hidden = nn.Parameter(torch.zeros(1, hidden_state_size))
+
+    def forward(self, x: torch.Tensor, h0: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, seq_len, _ = x.shape
+
+        if h0 is None:
+            hidden = self.init_hidden.expand(batch_size, -1)
+        else:
+            if h0.dim() == 3:
+                hidden = h0[-1]
+            else:
+                hidden = h0
+
+        outputs = []
+        for t in range(seq_len):
+            hidden = self.gru_cell(x[:, t, :], hidden)
+            outputs.append(hidden)
+
+        output = torch.stack(outputs, dim=1)
+        hidden_final = hidden.unsqueeze(0)
+
+        return output, hidden_final
+
+
 class RNNProtocol(Protocol):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         ...

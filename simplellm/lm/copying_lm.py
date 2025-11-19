@@ -7,6 +7,7 @@ import shutil
 import datetime
 
 from .transformer import TransformerLM, TransformerBlock
+from .lm import MyGRU
 
 ##############################################
 # Vocabulary / special tokens
@@ -344,7 +345,7 @@ class PointerGeneratorLM(nn.Module):
         self.pos_embed   = nn.Embedding(max_len, d_model)
 
         # Auto-regressive core: unidirectional GRU
-        self.gru = nn.GRU(d_model, d_model, batch_first=True)
+        self.gru = MyGRU(d_model, d_model)
 
         # Attention (self-attention)
         self.W_q = nn.Linear(2 * d_model, 2 * d_model, bias=False) # query (from GRU state and raw input embedding)
@@ -434,7 +435,7 @@ class TransformerPointerGeneratorLM(nn.Module):
         self.abs_pos_embed = nn.Embedding(max_len, d_model)
 
         # Auto-regressive core: unidirectional GRU
-        self.gru = nn.GRU(d_model, d_model, batch_first=True)
+        self.gru = MyGRU(d_model, d_model)
 
         self.tf_blocks = nn.Sequential(*[TransformerBlock(max_len, d_model, n_heads=n_head, head_size=None, ff_hidden_size=None) for _ in range(num_layers)])
 
