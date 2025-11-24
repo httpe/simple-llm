@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import random
+import math
 import shutil
 import datetime
 
@@ -845,6 +846,7 @@ def train():
     batch_size = 128
     num_steps = 10000
     lr = 1e-3
+    use_cosine_lr_schedule = False
     use_saved_model = False
     save_model = True
     debug = False
@@ -952,6 +954,15 @@ def train():
 
     # optimizer and loss
     opt = torch.optim.Adam(model.parameters(), lr=lr)
+    # Cosine LR decay from lr -> 0 over total steps (accounts for resumed max_step)
+    start_step = max_step
+    total_steps = num_steps
+    def cosine_lambda(step_idx: int):
+        if not use_cosine_lr_schedule:
+            return 1.0
+        progress = min(start_step + step_idx, total_steps)
+        return 0.5 * (1 + math.cos(math.pi * progress / total_steps))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=cosine_lambda)
     # use NLLLoss  when model output is probabilities, use CrossEntropyLoss when model output is logits
     criterion = nn.NLLLoss(ignore_index=PAD)
 
@@ -1007,6 +1018,7 @@ def train():
         opt.zero_grad()
         loss.backward()
         opt.step()
+        scheduler.step()
 
         # if validation_acc > 0.95 and not lr_stepped_down:
         #     for param_group in opt.param_groups:
@@ -1038,8 +1050,10 @@ def train():
                     print()
 
                 # print test accuracy
-                validation_acc = correct.float().mean().item()
-                print(f"Validation Accuracy: Prev Max = {max_validation_acc:.4f}, Curr = {validation_acc:.4f}")
+                n_correct = correct.sum().item()
+                n_total = correct.size(0)
+                validation_acc = n_correct / n_total
+                print(f"Validation Accuracy: Prev Max = {max_validation_acc:.4f}, Curr = {validation_acc:.4f} ({n_correct}/{n_total})")
                 max_validation_acc = max(max_validation_acc, validation_acc)
 
             model.train()
@@ -1056,9 +1070,9 @@ def train():
                 perf_path = os.path.join(result_dir, f"training_performance.txt")
                 if not os.path.exists(perf_path):
                     with open(perf_path, "w") as f:
-                        f.write("TrainStartTime\tStep\tLoss\tMinLoss\tValAcc\tMaxValAcc\n")
+                        f.write("TrainStartTime\tStep\tLoss\tMinLoss\tNCorrect\tNTotal\tValAcc\tMaxValAcc\n")
                 with open(perf_path, "a") as f:
-                    f.write(f"{training_timestamp}\t{step}\t{loss.item():.4f}\t{min_loss:.4f}\t{validation_acc:.4f}\t{max_validation_acc:.4f}\n")
+                    f.write(f"{training_timestamp}\t{step}\t{loss.item():.4f}\t{min_loss:.4f}\t{n_correct}\t{n_total}\t{validation_acc:.4f}\t{max_validation_acc:.4f}\n")
 
             print("------------------------------------")
             print("")
