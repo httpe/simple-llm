@@ -8,6 +8,7 @@ import datetime
 
 from .transformer import TransformerLM, TransformerBlock
 from .lm import MyGRU
+from . import sticky
 
 ##############################################
 # Vocabulary / special tokens
@@ -50,7 +51,7 @@ class LMSampleGenerator:
 
     def pretty_to_str(self, sample: torch.Tensor) -> str:
         return str(sample.tolist())
-    
+
     def get_lm_output(self, lm_input: torch.Tensor) -> torch.Tensor:
         '''
         Given lm_input of shape [B, T], return lm_output of shape [B, T]
@@ -61,6 +62,13 @@ class LMSampleGenerator:
         lm_output[:, :-1] = lm_input[:, 1:].clone()
 
         return lm_output
+
+    def verify(self, predicted: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+        """
+        Default verifier: exact match against reference.
+        Returns a bool tensor of shape [B].
+        """
+        return (predicted == reference).all(dim=1)
 
 class CountingSampleGenerator(LMSampleGenerator):
     def __init__(self, min_digits: int, max_digits: int, min_count: int, max_count: int):
@@ -93,6 +101,78 @@ class CountingSampleGenerator(LMSampleGenerator):
     @property
     def vocab_size(self):
         return FIRST_TOKEN + 10  # digits 0-9
+
+    @staticmethod
+    def _parse_numbers(token_seq: torch.Tensor) -> list[int] | None:
+        """
+        Parse a token sequence consisting of digits (FIRST_TOKEN + d) and SEP tokens into integers.
+        Returns None if the sequence is malformed.
+        """
+        numbers: list[int] = []
+        digits: list[int] = []
+        for tok in token_seq.tolist():
+            if tok == PAD:
+                break
+            if tok == SEP:
+                if len(digits) == 0:
+                    return None
+                numbers.append(int("".join(str(d) for d in digits)))
+                digits = []
+                continue
+            if tok < FIRST_TOKEN:
+                return None
+            digit = tok - FIRST_TOKEN
+            if digit < 0 or digit > 9:
+                return None
+            digits.append(digit)
+        if len(digits) > 0:
+            numbers.append(int("".join(str(d) for d in digits)))
+        if len(numbers) == 0:
+            return None
+        return numbers
+
+    def verify(self, predicted: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+        """
+        A counting sample is correct if the model continues counting (by +1) after END_IN,
+        starting from the last input number, for however many numbers it emits before END_OUT.
+        """
+        assert predicted.shape == reference.shape
+        B, T = predicted.shape
+        device = predicted.device
+        results = torch.zeros(B, dtype=torch.bool, device=device)
+
+        for i in range(B):
+            ref_seq = reference[i]
+            pred_seq = predicted[i]
+
+            end_in_positions = (ref_seq == END_IN).nonzero(as_tuple=True)[0]
+            if len(end_in_positions) == 0:
+                continue
+            end_in_idx = int(end_in_positions[0].item())
+
+            # parse numbers before END_IN from the reference to know where to continue
+            prefix_numbers = self._parse_numbers(ref_seq[1:end_in_idx])  # skip BOS
+            if not prefix_numbers:
+                continue
+            start_num = prefix_numbers[-1]
+
+            # locate END_OUT in the prediction
+            post_end_in = pred_seq[end_in_idx + 1 :]
+            end_out_positions = (post_end_in == END_OUT).nonzero(as_tuple=True)[0]
+            if len(end_out_positions) == 0:
+                continue
+            end_out_idx = int(end_out_positions[0].item())
+
+            # parse the predicted numbers after END_IN up to END_OUT
+            predicted_numbers = self._parse_numbers(post_end_in[:end_out_idx])
+            if not predicted_numbers:
+                continue
+
+            expected_numbers = [start_num + j + 1 for j in range(len(predicted_numbers))]
+            if predicted_numbers == expected_numbers:
+                results[i] = True
+
+        return results
 
     @staticmethod
     def generate_counting_samples(batch_size: int, min_digits: int, max_digits: int, min_count: int, max_count: int) -> torch.Tensor:
@@ -137,6 +217,107 @@ class CountingSampleGenerator(LMSampleGenerator):
             samples[i, :len(sample)] = torch.tensor(sample, dtype=torch.long)
 
         return samples
+
+
+class StickySampleGenerator(LMSampleGenerator):
+    def __init__(self, min_length: int, max_length: int, stickiness: int, strict: bool):
+        assert 0 < min_length <= max_length, "min_length must be in (0, max_length]"
+        assert stickiness >= 0, "stickiness must be >= 0"
+        self.min_length = min_length
+        self.max_length = max_length
+        self.stickiness = stickiness
+        self.strict = strict
+
+        # Build tokenizer compatible with global special tokens.
+        chars = list("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        self.char2tok = {c: FIRST_TOKEN + i for i, c in enumerate(chars)}
+        self.tok2char = {v: k for k, v in self.char2tok.items()}
+
+        # BOS + max content + END
+        self.max_seq_len = 1 + max_length + 1
+
+    def generate(self, batch_size: int) -> torch.Tensor:
+        raw_samples = sticky.generate_samples(
+            n_samples=batch_size,
+            min_length=self.min_length,
+            max_length=self.max_length,
+            stickiness=self.stickiness,
+            strict=self.strict,
+        )
+        return self.convert_samples_to_lm_input(raw_samples)
+
+    def convert_samples_to_lm_input(self, raw_samples: list[str]) -> torch.Tensor:
+        samples = torch.full((len(raw_samples), self.max_seq_len), PAD, dtype=torch.long)
+        for i, sample in enumerate(raw_samples):
+            token_ids = [BOS] + [self.char2tok[c] for c in sample] + [END_OUT]
+            assert len(token_ids) <= self.max_seq_len, "Sample longer than configured max_seq_len"
+            samples[i, :len(token_ids)] = torch.tensor(token_ids, dtype=torch.long)
+        return samples
+
+    def pretty_to_str(self, sample: torch.Tensor) -> str:
+        tokens = [t for t in sample.tolist() if t != PAD]
+        decoded_tokens = []
+        for token in tokens:
+            if token == BOS:
+                continue
+            if token == END_OUT:
+                decoded_tokens.append("<END>")
+                break
+            decoded_tokens.append(self.tok2char.get(token, "?"))
+        return "".join(decoded_tokens)
+
+    @property
+    def vocab_size(self):
+        return FIRST_TOKEN + len(self.char2tok)
+
+    def verify(self, predicted: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+        """
+        Verify that the predicted sequence decodes to a sample satisfying the sticky distribution.
+        """
+        assert predicted.shape == reference.shape
+        B, T = predicted.shape
+        results = torch.zeros(B, dtype=torch.bool, device=predicted.device)
+
+        for i in range(B):
+            seq = predicted[i].tolist()
+
+            # Find start token (BOS)
+            try:
+                start_idx = seq.index(BOS)
+            except ValueError:
+                continue
+
+            # Find end token after start; stop early on PAD
+            end_idx = None
+            for j in range(start_idx + 1, len(seq)):
+                tok = seq[j]
+                if tok == END_OUT:
+                    end_idx = j
+                    break
+                if tok == PAD:
+                    # hit padding before an end token -> invalid
+                    end_idx = None
+                    break
+            if end_idx is None:
+                continue
+
+            content_tokens = seq[start_idx + 1 : end_idx]
+            if not (self.min_length <= len(content_tokens) <= self.max_length):
+                continue
+
+            # ensure trailing tokens are PAD only
+            if any(tok != PAD for tok in seq[end_idx + 1 :]):
+                continue
+
+            try:
+                content = "".join(self.tok2char[tok] for tok in content_tokens)
+            except KeyError:
+                continue
+
+            if sticky.validate_one_sample(self.stickiness, self.strict, content):
+                results[i] = True
+
+        return results
 
 
 
@@ -529,12 +710,22 @@ def greedy_decode(model, lm_seq):
     max_len = S
 
     # compute per-example index of END_IN
-    end_in_pos = (lm_seq == END_IN).int().argmax(dim=1)  # [B]
+    end_in_mask = (lm_seq == END_IN)
+    end_in_pos = torch.full((B,), -1, dtype=torch.long, device=device)
+    found = end_in_mask.any(dim=1)
+    if found.any():
+        end_in_pos[found] = end_in_mask[found].float().argmax(dim=1)
 
     outputs = torch.full((B, max_len), PAD, device=device, dtype=torch.long)
     finished = torch.zeros(B, dtype=torch.bool, device=device)
 
     for t in range(max_len):
+        # always seed BOS (or first token) before model generation
+        if t == 0:
+            assert (lm_seq[:, 0] == BOS).all(), "First token must be BOS"
+            outputs[:, t] = lm_seq[:, t].clone()
+            continue
+
         # sequences that should start generating (we copy from src until t > end_in_pos)
         to_generate = (t > end_in_pos)  # [B]  (True: we are in generation phase)
         if not to_generate.any():
@@ -594,7 +785,7 @@ def train():
     torch.cuda.manual_seed_all(42)
     random.seed(42)
 
-    task_type = "copy" # "copy" or "take_last" or "counting"
+    task_type = "counting" # "copy" or "take_last" or "counting" or "sticky"
     model_type = "ptrGen" # "ptrGen" or "tfPtrGen" or "tf"
 
     # training
@@ -631,6 +822,15 @@ def train():
         vocab_size = sample_generator.vocab_size
         model_max_context_size = 1 + max_digits * max_count + (max_count - 1) + 2
         task_prefix = f"minD{min_digits}_maxD{max_digits}_minC{min_count}_maxC{max_count}"
+    elif task_type == "sticky":
+        min_length = 2
+        max_length = 12
+        stickiness = 1
+        strict = False
+        sample_generator = StickySampleGenerator(min_length, max_length, stickiness, strict)
+        vocab_size = sample_generator.vocab_size
+        model_max_context_size = sample_generator.max_seq_len
+        task_prefix = f"minL{min_length}_maxL{max_length}_sticky{stickiness}_{'strict' if strict else 'loose'}"
     else:
         raise ValueError("Unknown task_type")
     
@@ -761,9 +961,9 @@ def train():
             with torch.no_grad():
                 pred = greedy_decode(model, test_lm_input)
 
-                # # show 3 good samples
-                good = (pred == test_lm_input).all(dim=1)
-                good_idx = good.nonzero(as_tuple=True)[0]
+                # show 3 good samples
+                correct = sample_generator.verify(pred, test_lm_input)
+                good_idx = correct.nonzero(as_tuple=True)[0]
                 for i in range(min(3, len(good_idx))):
                     print(f"Good Sample {i}:")
                     print("Sample:", sample_generator.pretty_to_str(test_lm_input[good_idx[i],:]))
@@ -771,7 +971,7 @@ def train():
                     print()
 
                 # show 3 bad samples:
-                bad = (pred != test_lm_input).any(dim=1)
+                bad = correct.logical_not()
                 bad_idx = bad.nonzero(as_tuple=True)[0]
                 for i in range(min(3, len(bad_idx))):
                     print(f"Bad Sample {i}:")
@@ -780,7 +980,7 @@ def train():
                     print()
 
                 # print test accuracy
-                validation_acc = good.float().mean().item()
+                validation_acc = correct.float().mean().item()
                 print(f"Validation Accuracy: Prev Max = {max_validation_acc:.4f}, Curr = {validation_acc:.4f}")
                 max_validation_acc = max(max_validation_acc, validation_acc)
 
