@@ -72,16 +72,38 @@ class LMSampleGenerator:
 
 class CountingSampleGenerator(LMSampleGenerator):
     def __init__(self, min_digits: int, max_digits: int, min_count: int, max_count: int):
+        assert min_digits > 0, "min_digits must be > 0"
+        assert max_digits >= min_digits, "max_digits must be >= min_digits"
+        assert min_count > 1, "min_count must be > 1"
+        assert max_count >= min_count, "max_count must be >= min_count"
         self.min_digits = min_digits
         self.max_digits = max_digits
         self.min_count = min_count
         self.max_count = max_count
+        self.max_count_digits = len(str(self.max_count))
+        self.min_start = 0 if self.min_digits == 1 else 10 ** (self.min_digits - 1)
+        self.max_number = 10 ** self.max_digits - 1
+        assert self.max_number - self.max_count >= self.min_start, "Configuration leaves no space for counting outputs"
+        self.max_seq_len = (
+            1  # BOS
+            + self.max_count_digits  # count digits
+            + 1  # SEP between count and start
+            + self.max_digits  # start digits
+            + 1  # END_IN
+            + (self.max_digits * self.max_count)  # digits for outputs
+            + (self.max_count - 1)  # separators between outputs
+            + 1  # END_OUT
+        )
 
     def generate(self, batch_size: int) -> torch.Tensor:
-        samples = self.generate_counting_samples(batch_size, self.min_digits, self.max_digits, self.min_count, self.max_count)
+        samples = torch.full((batch_size, self.max_seq_len), PAD, dtype=torch.long)
+        for i in range(batch_size):
+            sample = self._generate_single_sample()
+            samples[i, :len(sample)] = torch.tensor(sample, dtype=torch.long)
         return samples
 
-    def pretty_to_str(self, sample: torch.Tensor) -> str:
+    @staticmethod
+    def pretty_to_str(sample: torch.Tensor) -> str:
         token_to_str = {
             PAD: "",
             BOS: "",
@@ -134,7 +156,7 @@ class CountingSampleGenerator(LMSampleGenerator):
     def verify(self, predicted: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
         """
         A counting sample is correct if the model continues counting (by +1) after END_IN,
-        starting from the last input number, for however many numbers it emits before END_OUT.
+        for exactly the referenced count numbers and stops with END_OUT.
         """
         assert predicted.shape == reference.shape
         B, T = predicted.shape
@@ -150,11 +172,13 @@ class CountingSampleGenerator(LMSampleGenerator):
                 continue
             end_in_idx = int(end_in_positions[0].item())
 
-            # parse numbers before END_IN from the reference to know where to continue
+            # parse count and start before END_IN from the reference
             prefix_numbers = self._parse_numbers(ref_seq[1:end_in_idx])  # skip BOS
-            if not prefix_numbers:
+            if not prefix_numbers or len(prefix_numbers) < 2:
                 continue
-            start_num = prefix_numbers[-1]
+            count, start_num = prefix_numbers[0], prefix_numbers[-1]
+            if count < 1:
+                continue
 
             # locate END_OUT in the prediction
             post_end_in = pred_seq[end_in_idx + 1 :]
@@ -168,55 +192,84 @@ class CountingSampleGenerator(LMSampleGenerator):
             if not predicted_numbers:
                 continue
 
-            expected_numbers = [start_num + j + 1 for j in range(len(predicted_numbers))]
-            if predicted_numbers == expected_numbers:
+            if len(predicted_numbers) != count:
+                continue
+
+            expected_numbers = [start_num + j + 1 for j in range(count)]
+            # ensure everything after END_OUT is PAD
+            trailing = post_end_in[end_out_idx + 1 :]
+            if predicted_numbers == expected_numbers and (trailing == PAD).all():
                 results[i] = True
 
         return results
 
-    @staticmethod
-    def generate_counting_samples(batch_size: int, min_digits: int, max_digits: int, min_count: int, max_count: int) -> torch.Tensor:
-        '''
-        Generate counting samples:
-        [BOS, "9", SEP, "1", "0", SEP, "1", "1", END_IN, "1", "2", SEP, "1", "3", END_OUT, PAD, ..., PAD]
-        '''
-        assert min_digits > 0, "min_digits must be > 0"
-        assert max_digits > 0, "max_digits must be > 0"
-        assert max_digits >= min_digits, "max_digits must be >= min_digits"
-        assert min_count > 1, "min_count must be > 1"
-        assert max_count > 1, "max_count must be > 1"
-        assert max_count >= min_count, "max_count must be >= min_count"
+    def _encode_number(self, value: int) -> list[int]:
+        return [FIRST_TOKEN + int(d) for d in str(value)]
 
-        max_seq_len = 1 + max_digits * max_count + (max_count - 1) + 2  # BOS + n * digits + (n-1) * SEP + END_IN + END_OUT
+    def _sample_start(self, count: int) -> int:
+        max_start = self.max_number - count
+        assert max_start >= self.min_start, "No valid starting point for given count"
+        return random.randint(self.min_start, max_start)
 
-        samples = torch.full((batch_size, max_seq_len), PAD, dtype=torch.long)
+    def _generate_single_sample(self) -> list[int]:
+        """
+        Generate a sample of the form:
+        [BOS, COUNT, SEP, START, END_IN, NEXT_1, SEP, ..., NEXT_N, END_OUT]
+        """
+        count = random.randint(self.min_count, self.max_count)
+        start = self._sample_start(count)
+        return self._build_sample(count, start)
 
-        for i in range(batch_size):
-            sample = [BOS]
-            n_num = random.randint(min_count, max_count)  # count of numbers to generate
-            n_input = n_num - 1  # count of numbers as input, only output one more number for now
+    def _build_sample(self, count: int, start: int) -> list[int]:
+        assert count >= 2, "count must be at least 2"
+        assert start >= self.min_start, "start below allowed min_start"
+        assert start + count <= self.max_number, "start + count exceeds max_number"
 
-            for j in range(n_num):
-                if j == 0:
-                    min_x = 0 if min_digits == 1 else 10 ** (min_digits - 1)
-                    x = random.randint(min_x, 10 ** max_digits - n_num)  # ensure we have enough room to count up
-                else:
-                    x = x + 1
-                digits = [int(d) for d in str(x)]
-                tokens = [d + FIRST_TOKEN for d in digits]  # shift to token ids
-                sample.extend(tokens)
-                if j < n_num - 1:
-                    if j == n_input - 1:
-                        sample.append(END_IN)
-                    else:
-                        sample.append(SEP)
-                else:
-                    sample.append(END_OUT)
-            if len(sample) > max_seq_len:
-                breakpoint()
-            samples[i, :len(sample)] = torch.tensor(sample, dtype=torch.long)
+        sample = [BOS]
+        sample.extend(self._encode_number(count))
+        sample.append(SEP)
 
-        return samples
+        sample.extend(self._encode_number(start))
+        sample.append(END_IN)
+
+        current = start
+        for idx in range(count):
+            current += 1
+            sample.extend(self._encode_number(current))
+            if idx < count - 1:
+                sample.append(SEP)
+            else:
+                sample.append(END_OUT)
+
+        assert len(sample) <= self.max_seq_len, "Sample longer than configured max_seq_len"
+        return sample
+
+    def generate_boundary_samples(self) -> torch.Tensor:
+        """
+        Generate deterministic boundary cases where increment crosses a digit-length boundary
+        (e.g., 9->10, 99->100). Returns tensor shaped [N, max_seq_len].
+        """
+        samples: list[list[int]] = []
+        min_count_for_boundary = max(self.min_count, 2)
+        for digits in range(self.min_digits, self.max_digits):
+            start = (10 ** digits) - 1
+            if start < self.min_start:
+                continue
+            if start + min_count_for_boundary > self.max_number:
+                continue
+            count = min_count_for_boundary
+            try:
+                samples.append(self._build_sample(count, start))
+            except AssertionError:
+                continue
+
+        if len(samples) == 0:
+            return torch.empty((0, self.max_seq_len), dtype=torch.long)
+
+        tensor_samples = torch.full((len(samples), self.max_seq_len), PAD, dtype=torch.long)
+        for i, s in enumerate(samples):
+            tensor_samples[i, :len(s)] = torch.tensor(s, dtype=torch.long)
+        return tensor_samples
 
 
 class StickySampleGenerator(LMSampleGenerator):
@@ -813,14 +866,14 @@ def train():
         model_max_context_size = max_seq_len * 2 # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
         task_prefix = f"maxSeq{max_seq_len}_maxSep{max_separators}"
     elif task_type == "counting":
-        max_seq_len = 24
+        max_seq_len = 64
         min_digits = 1
-        max_digits = 3
+        max_digits = 6
         min_count = 2
-        max_count = 5
+        max_count = 9
         sample_generator = CountingSampleGenerator(min_digits, max_digits, min_count, max_count)
         vocab_size = sample_generator.vocab_size
-        model_max_context_size = 1 + max_digits * max_count + (max_count - 1) + 2
+        model_max_context_size = sample_generator.max_seq_len
         task_prefix = f"minD{min_digits}_maxD{max_digits}_minC{min_count}_maxC{max_count}"
     elif task_type == "sticky":
         min_length = 2
@@ -904,6 +957,11 @@ def train():
 
     # validation set
     test_lm_input = sample_generator.generate(batch_size * 10)
+    if task_type == "counting":
+        assert isinstance(sample_generator, CountingSampleGenerator)
+        boundary_samples = sample_generator.generate_boundary_samples()
+        if boundary_samples.numel() > 0:
+            test_lm_input = torch.cat([test_lm_input, boundary_samples], dim=0)
 
     if task_type == "counting":
         has_special_sample = False
@@ -912,7 +970,7 @@ def train():
             input_part = s.split("<END_IN>")[0]
             output_part = s.split("<END_IN>")[1]
             last_input_num = int(input_part.split(',')[-1].replace(' ', ''))
-            first_output_num = int(output_part.split(',')[0].replace(' ', '').replace('<END_OUT>', ''))
+            first_output_num = int(output_part.split(',')[-1].replace(' ', '').replace('<END_OUT>', ''))
             if len(str(last_input_num)) != len(str(first_output_num)):
                 print("Test Sample with different length output:", s)
                 has_special_sample = True
