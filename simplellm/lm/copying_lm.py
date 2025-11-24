@@ -638,7 +638,7 @@ def train():
     if model_type == "ptrGen":
         d_model = 32
         model = PointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size).to(device)
-        model_prefix = f"ptrGen_rawInputPassThrough_posAttn"
+        model_prefix = f"ptrGen_rawInputPassThrough_posAttn_resLayerNormGRU"
     elif model_type == "tfPtrGen":
         d_model = 32
         n_head = 2

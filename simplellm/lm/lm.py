@@ -231,6 +231,36 @@ class GRUCell(nn.Module):
         return hidden
 
 
+class LayerNormResidualGRUCell(nn.Module):
+    """GRU cell variant with residual input path and LayerNorm for stability."""
+
+    def __init__(self, input_size: int, hidden_state_size: int):
+        super().__init__()
+
+        self.input_size = input_size
+        self.hidden_state_size = hidden_state_size
+
+        self.linear_z = nn.Linear(input_size + hidden_state_size, hidden_state_size)
+        self.linear_r = nn.Linear(input_size + hidden_state_size, hidden_state_size)
+        self.linear_h = nn.Linear(input_size + hidden_state_size, hidden_state_size)
+        self.input_residual = nn.Linear(input_size, hidden_state_size, bias=False)
+        self.post_layer_norm = nn.LayerNorm(hidden_state_size)
+
+    def forward(self, x: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
+        # x: (B, X)
+        # h: (B, H)
+        combined = torch.cat([x, h], dim=1)                     # (B, X + H)
+        z = torch.sigmoid(self.linear_z(combined))              # (B, H)
+        r = torch.sigmoid(self.linear_r(combined))              # (B, H)
+        h_masked = r * h                                        # (B, H)
+        combined_masked = torch.cat([x, h_masked], dim=1)       # (B, X + H)
+        h_hat = torch.tanh(self.linear_h(combined_masked))      # (B, H)
+        hidden = (1 - z) * h + z * h_hat                        # (B, H)
+        hidden = hidden + self.input_residual(x)                # (B, H)
+        hidden = self.post_layer_norm(hidden)                   # (B, H)
+        return hidden
+
+
 class MyGRU(nn.Module):
     """Single-layer GRU that mirrors nn.GRU using explicit GRUCell steps."""
 
@@ -240,7 +270,7 @@ class MyGRU(nn.Module):
         self.input_size = input_size # D
         self.hidden_state_size = hidden_state_size # H
 
-        self.gru_cell = GRUCell(input_size, hidden_state_size)
+        self.gru_cell = LayerNormResidualGRUCell(input_size, hidden_state_size)
         self.init_hidden = nn.Parameter(torch.zeros(1, hidden_state_size))
 
     def forward(self, x: torch.Tensor, h0: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
