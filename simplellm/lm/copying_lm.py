@@ -659,27 +659,32 @@ def train():
     print(f"Model Parameter Count: {num_params}")
 
     model_desc = f"{model_prefix}_vocab{vocab_size}_dModel{d_model}_maxCtx{model_max_context_size}_params{num_params}"
-    model_save_dir = f"./simplellm/lm/saved_models/{task_type}/{task_prefix}/{model_desc}"
+    result_dir = f"./simplellm/lm/saved_models/{task_type}/{task_prefix}/{model_desc}"
+    checkpoint_dir = os.path.join(result_dir, "checkpoints")
 
     if not use_saved_model and save_model:
-        if os.path.exists(model_save_dir):
+        if os.path.exists(result_dir):
             # move to backup dir
-            backup_dir = model_save_dir + "_backup_" + datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-            shutil.move(model_save_dir, backup_dir)
+            backup_dir = result_dir + "_backup_" + datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+            shutil.move(result_dir, backup_dir)
             print("Moved existing model dir to backup:", backup_dir)
 
     # copy this file to model save dir for record
     if save_model:
-        if not os.path.exists(model_save_dir):
-            os.makedirs(model_save_dir)
+        if not os.path.exists(result_dir):
+            os.makedirs(result_dir)
+        if not os.path.exists(checkpoint_dir):
+            os.makedirs(checkpoint_dir)
         training_timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
         script_name = training_timestamp + "_" + os.path.basename(__file__)
-        shutil.copy(__file__, os.path.join(model_save_dir, script_name))
+        shutil.copy(__file__, os.path.join(result_dir, script_name))
+        lm_script_name = training_timestamp + "_lm.py"
+        shutil.copy(os.path.join(os.path.dirname(__file__), "lm.py"), os.path.join(result_dir, lm_script_name))
 
     # find and load max step model
     max_step = 0
     if use_saved_model:
-        saved_models = os.listdir(model_save_dir) if os.path.exists(model_save_dir) else []
+        saved_models = os.listdir(checkpoint_dir) if os.path.exists(checkpoint_dir) else []
         path = None
         for fn in saved_models:
             if fn.endswith(".pt"):
@@ -687,7 +692,7 @@ def train():
                 step = int(parts[1].split(".")[0])
                 if step > max_step:
                     max_step = step
-                    path = os.path.join(model_save_dir, fn)
+                    path = os.path.join(checkpoint_dir, fn)
         if path is not None:
             model.load_state_dict(torch.load(path, map_location=device))
             print("Loaded saved model from", path)
@@ -785,12 +790,12 @@ def train():
             min_loss = min(min_loss, loss.item())
 
             if save_model:
-                path = os.path.join(model_save_dir, f"{training_timestamp}_step_{step}.pt")
+                path = os.path.join(checkpoint_dir, f"{training_timestamp}_step_{step}.pt")
                 torch.save(model.state_dict(), path)
                 print("Saved model to", path)
 
                 # performance
-                perf_path = os.path.join(model_save_dir, f"{model_desc}_training_performance.txt")
+                perf_path = os.path.join(result_dir, f"training_performance.txt")
                 if not os.path.exists(perf_path):
                     with open(perf_path, "w") as f:
                         f.write("TrainStartTime\tStep\tLoss\tMinLoss\tValAcc\tMaxValAcc\n")
