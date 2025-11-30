@@ -21,6 +21,12 @@ END_IN = 2
 END_OUT = 3
 SEP = 4 # semantic separator
 FIRST_TOKEN = 5  # random tokens start from this id
+# Chain-of-thought special tokens
+INC = FIRST_TOKEN + 10
+DEC = FIRST_TOKEN + 11
+STEP = FIRST_TOKEN + 12
+START_THINK = FIRST_TOKEN + 13
+END_THINK = FIRST_TOKEN + 14
 
 ##############################################
 # Sample generation
@@ -271,6 +277,339 @@ class CountingSampleGenerator(LMSampleGenerator):
         for i, s in enumerate(samples):
             tensor_samples[i, :len(s)] = torch.tensor(s, dtype=torch.long)
         return tensor_samples
+
+
+class CountingCoTSampleGenerator(CountingSampleGenerator):
+    """
+    Counting sample generator with chain-of-thought tokens:
+    - START_THINK / END_THINK wrap the reasoning for each output number.
+    - INC / DEC mark digit-level increment/decrement operations.
+    - STEP separates reasoning steps.
+    """
+    def __init__(self, min_digits: int, max_digits: int, min_count: int, max_count: int):
+        super().__init__(min_digits, max_digits, min_count, max_count)
+        self._enforce_len = False
+        # Pre-compute a worst-case length sample to size padding conservatively.
+        self.max_seq_len = self._compute_max_seq_len()
+        self._enforce_len = True
+
+    @property
+    def vocab_size(self):
+        # digits (10) + 5 CoT tokens, plus special tokens before FIRST_TOKEN
+        return FIRST_TOKEN + 10 + 5
+
+    def pretty_to_str(self, sample: torch.Tensor) -> str:
+        token_to_str = {
+            PAD: "",
+            BOS: "",
+            END_IN: "<END_IN>",
+            END_OUT: "<END_OUT>",
+            SEP: ",",
+            INC: "<INC>",
+            DEC: "<DEC>",
+            STEP: "<STEP>",
+            START_THINK: "<START_THINK>",
+            END_THINK: "<END_THINK>",
+        }
+        s = []
+        for token in sample:
+            token_int = int(token.item())
+            if token_int in token_to_str:
+                s.append(token_to_str[token_int])
+            elif FIRST_TOKEN <= token_int < FIRST_TOKEN + 10:
+                s.append(str(token_int - FIRST_TOKEN))
+            else:
+                s.append(f"?{token_int}")
+        return " ".join(s)
+
+    def generate(self, batch_size: int, count: int | None = None, start: int | None = None) -> torch.Tensor:
+        seqs: list[list[int]] = []
+        for _ in range(batch_size):
+            seq = self._generate_single_cot_sample(count, start)
+            if self._enforce_len:
+                assert len(seq) <= self.max_seq_len, "Generated sequence exceeds configured max_seq_len"
+            seqs.append(seq)
+
+        samples = torch.full((batch_size, self.max_seq_len), PAD, dtype=torch.long)
+        for i, seq in enumerate(seqs):
+            samples[i, :len(seq)] = torch.tensor(seq, dtype=torch.long)
+        return samples
+
+    def verify(self, predicted: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+        """
+        Verify that the predicted outputs (numbers after END_THINK blocks) correctly continue counting
+        for the referenced count numbers.
+        """
+        assert predicted.shape == reference.shape
+        B, _ = predicted.shape
+        device = predicted.device
+        results = torch.zeros(B, dtype=torch.bool, device=device)
+
+        for i in range(B):
+            ref_seq = reference[i]
+            pred_seq = predicted[i]
+
+            end_in_positions = (ref_seq == END_IN).nonzero(as_tuple=True)[0]
+            if len(end_in_positions) == 0:
+                continue
+            end_in_idx = int(end_in_positions[0].item())
+
+            prefix_numbers = self._parse_numbers(ref_seq[1:end_in_idx])  # [count, start]
+            if not prefix_numbers or len(prefix_numbers) < 2:
+                continue
+            count, start_num = prefix_numbers[0], prefix_numbers[-1]
+
+            expected_numbers = [start_num + j + 1 for j in range(count)]
+            predicted_numbers = self._extract_outputs_after_think(pred_seq, end_in_idx)
+
+            if predicted_numbers == expected_numbers:
+                results[i] = True
+
+        return results
+
+    # -------------------------------
+    # Helpers for CoT construction
+    # -------------------------------
+    def _digits_from_int(self, value: int) -> list[int]:
+        return [int(d) for d in str(value)]
+
+    def _encode_digits(self, digits: list[int]) -> list[int]:
+        return [FIRST_TOKEN + d for d in digits]
+
+    def _digits_with_marker(self, value: int, marker: int | None = None, *, position: str = "after", digit_index: int | None = None) -> list[int]:
+        """
+        Encode a number into digit tokens and optionally insert a marker token
+        either before or after a specific digit (default: after the last digit).
+        """
+        tokens = self._encode_number(value)
+        if marker is None:
+            return tokens
+
+        assert position in {"before", "after"}, "position must be 'before' or 'after'"
+        if len(tokens) == 0:
+            return tokens
+
+        idx = len(tokens) - 1 if digit_index is None else max(0, min(len(tokens) - 1, digit_index))
+        insert_at = idx if position == "before" else idx + 1
+        return tokens[:insert_at] + [marker] + tokens[insert_at:]
+
+    def _build_step_tokens(self, counter_tokens: list[int], number_tokens: list[int]) -> list[int]:
+        """
+        Compose one thinking step: remaining counter digits, SEP, current output digits.
+        Digits themselves are not separated by SEP.
+        """
+        return list(counter_tokens) + [SEP] + list(number_tokens)
+
+    def _carry_run_length(self, digits: list[int]) -> int:
+        run = 0
+        for d in reversed(digits):
+            if d == 9:
+                run += 1
+            else:
+                break
+        return run
+
+    def _needs_carry(self, value: int) -> bool:
+        # Incrementing by 1 triggers a carry when any trailing digit is 9
+        return value % 10 == 9
+
+    def _build_carry_steps(self, remaining_after: int, prev_digits: list[int]) -> list[list[int]]:
+        """
+        Build intermediate carry steps turning trailing 9s into 0s one digit at a time.
+        Example: 99 -> steps: [9 <INC> 0], [<INC> 0 0]
+        """
+        run_len = self._carry_run_length(prev_digits)
+        if run_len == 0:
+            return []
+
+        steps: list[list[int]] = []
+        run_start = len(prev_digits) - run_len
+        for offset in range(run_len - 1, -1, -1):
+            pos = run_start + offset
+            prefix = prev_digits[:pos]
+            zeros_after = run_len - (offset + 1)
+            number_tokens = self._encode_digits(prefix) + [INC, FIRST_TOKEN + 0] + [FIRST_TOKEN + 0] * zeros_after
+            steps.append(self._build_step_tokens(self._encode_number(remaining_after), number_tokens))
+
+        return steps
+
+    def _build_thinking_steps(self, count: int, start: int) -> list[list[int]]:
+        """
+        Build the chain-of-thought steps for generating `count` numbers starting from `start`.
+        Each number contributes:
+          - an action step with DEC/INC markers
+          - an optional carry step if the increment crosses a digit boundary
+          - a state step with the updated counter and value
+        """
+        steps: list[list[int]] = []
+        remaining = count
+        current = start
+
+        for _ in range(count):
+            next_value = current + 1
+            remaining_after = remaining - 1
+
+            prev_digits = self._digits_from_int(current)
+            next_digits = self._digits_from_int(next_value)
+
+            action_counter = self._digits_with_marker(remaining, DEC)
+            action_number = self._digits_with_marker(current, INC)
+            steps.append(self._build_step_tokens(action_counter, action_number))
+
+            if self._needs_carry(current):
+                steps.extend(self._build_carry_steps(remaining_after, prev_digits))
+
+            state_counter = self._encode_number(remaining_after)
+            state_number = self._encode_number(next_value)
+            steps.append(self._build_step_tokens(state_counter, state_number))
+
+            current = next_value
+            remaining = remaining_after
+
+        return steps
+
+    def _extract_outputs_after_think(self, seq: torch.Tensor, end_in_idx: int) -> list[int]:
+        """
+        Extract actual output numbers (between END_THINK and SEP/END_OUT) ignoring CoT content.
+        """
+        outputs: list[int] = []
+        in_think = False
+        collecting_digits: list[int] = []
+        end_out_pos: int | None = None
+        for rel_idx, tok in enumerate(seq[end_in_idx + 1 :], start=end_in_idx + 1):
+            tok_int = int(tok.item())
+            if tok_int == START_THINK:
+                in_think = True
+                collecting_digits = []
+                continue
+            if tok_int == END_THINK:
+                in_think = False
+                collecting_digits = []
+                continue
+            if in_think:
+                continue
+
+            if tok_int == SEP or tok_int == END_OUT:
+                if len(collecting_digits) > 0:
+                    outputs.append(int("".join(str(d) for d in collecting_digits)))
+                    collecting_digits = []
+                if tok_int == END_OUT:
+                    end_out_pos = rel_idx
+                    break
+            elif FIRST_TOKEN <= tok_int < FIRST_TOKEN + 10:
+                collecting_digits.append(tok_int - FIRST_TOKEN)
+            elif tok_int == PAD:
+                break
+
+        if end_out_pos is not None:
+            trailing = seq[end_out_pos + 1 :]
+            if not (trailing == PAD).all():
+                return []
+
+        return outputs
+
+    def _generate_single_cot_sample(self, count: int | None = None, start: int | None = None) -> list[int]:
+        if count is None:
+            count = random.randint(self.min_count, self.max_count)
+        if start is None:
+            start = self._sample_start(count)
+
+        assert count >= 2, "count must be at least 2"
+        assert start >= self.min_start, "start below allowed min_start"
+        assert start + count <= self.max_number, "start + count exceeds max_number"
+
+        sample: list[int] = [BOS]
+        sample.extend(self._encode_number(count))
+        sample.append(SEP)
+        sample.extend(self._encode_number(start))
+        sample.append(END_IN)
+
+        thinking_steps = self._build_thinking_steps(count, start)
+        sample.append(START_THINK)
+        for idx, step in enumerate(thinking_steps):
+            sample.extend(step)
+            if idx < len(thinking_steps) - 1:
+                sample.append(STEP)
+        sample.append(END_THINK)
+
+        current = start
+        for idx in range(count):
+            current += 1
+            sample.extend(self._encode_number(current))
+            if idx < count - 1:
+                sample.append(SEP)
+            else:
+                sample.append(END_OUT)
+
+        if self._enforce_len:
+            assert len(sample) <= self.max_seq_len, "Generated sequence exceeds configured max_seq_len"
+        return sample
+
+    def _compute_max_seq_len(self) -> int:
+        """
+        Return a conservative upper bound on sequence length to avoid under-sizing
+        positional embeddings. Uses an analytic bound and also samples a few
+        representative starts near digit boundaries.
+        """
+        max_count_digits = len(str(self.max_count))
+        tokens_per_step_upper = max_count_digits + self.max_digits + 2  # counter digits + SEP + digits + optional marker
+        max_steps_per_number = 2 + self.max_digits  # action + state + one per trailing 9 (worst-case)
+        think_tokens_per_number = (max_steps_per_number * tokens_per_step_upper) + (max_steps_per_number - 1)  # STEP separators
+        header_tokens = 1 + max_count_digits + 1 + self.max_digits + 1  # BOS + count + SEP + start + END_IN
+        output_tokens = (self.max_count * self.max_digits) + (self.max_count - 1) + 1  # outputs + SEP + END_OUT
+        analytic_bound = header_tokens + 1 + (self.max_count * think_tokens_per_number) + 1 + output_tokens  # START/END_THINK
+
+        candidates: list[int] = [analytic_bound]
+        for count in range(self.min_count, self.max_count + 1):
+            start_candidates = {
+                self.min_start,
+                max(self.min_start, self.max_number - count),
+                self.max_number - count
+            }
+            # include boundary starts near powers of 10 to induce carries
+            for d in range(1, self.max_digits + 1):
+                for delta in [0, 1]:
+                    s = (10 ** d) - count - delta
+                    if s < self.min_start:
+                        continue
+                    if s + count > self.max_number:
+                        continue
+                    start_candidates.add(s)
+
+            for start in start_candidates:
+                seq = self._generate_single_cot_sample(count=count, start=start)
+                candidates.append(len(seq))
+
+        return max(candidates) if candidates else self.max_seq_len
+
+    def generate_boundary_samples(self) -> torch.Tensor:
+        """
+        Generate deterministic boundary cases where increments cross digit-length boundaries
+        (e.g., 9->10, 99->100). Returned tensor shape: [N, max_seq_len].
+        """
+        samples: list[list[int]] = []
+        min_count_for_boundary = max(self.min_count, 2)
+        for digits in range(self.min_digits, self.max_digits):
+            start = (10 ** digits) - 1
+            if start < self.min_start:
+                continue
+            if start + min_count_for_boundary > self.max_number:
+                continue
+            count = min_count_for_boundary
+            try:
+                seq = self._generate_single_cot_sample(count=count, start=start)
+            except AssertionError:
+                continue
+            samples.append(seq)
+
+        if len(samples) == 0:
+            return torch.empty((0, self.max_seq_len), dtype=torch.long)
+
+        tensor_samples = torch.full((len(samples), self.max_seq_len), PAD, dtype=torch.long)
+        for i, s in enumerate(samples):
+            tensor_samples[i, :len(s)] = torch.tensor(s, dtype=torch.long)
+        return tensor_samples
+
 
 
 class StickySampleGenerator(LMSampleGenerator):
@@ -839,7 +1178,7 @@ def train():
     torch.cuda.manual_seed_all(42)
     random.seed(42)
 
-    task_type = "counting" # "copy" or "take_last" or "counting" or "sticky"
+    task_type = "counting_cot" # "copy" or "take_last" or "counting" or "counting_cot" or "sticky"
     model_type = "ptrGen" # "ptrGen" or "tfPtrGen" or "tf"
 
     # training
@@ -868,15 +1207,23 @@ def train():
         model_max_context_size = max_seq_len * 2 # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
         task_prefix = f"maxSeq{max_seq_len}_maxSep{max_separators}"
     elif task_type == "counting":
-        max_seq_len = 64
         min_digits = 1
-        max_digits = 6
+        max_digits = 3
         min_count = 2
         max_count = 9
         sample_generator = CountingSampleGenerator(min_digits, max_digits, min_count, max_count)
         vocab_size = sample_generator.vocab_size
         model_max_context_size = sample_generator.max_seq_len
         task_prefix = f"minD{min_digits}_maxD{max_digits}_minC{min_count}_maxC{max_count}"
+    elif task_type == "counting_cot":
+        min_digits = 1
+        max_digits = 3
+        min_count = 2
+        max_count = 9
+        sample_generator = CountingCoTSampleGenerator(min_digits, max_digits, min_count, max_count)
+        vocab_size = sample_generator.vocab_size
+        model_max_context_size = sample_generator.max_seq_len
+        task_prefix = f"cot_minD{min_digits}_maxD{max_digits}_minC{min_count}_maxC{max_count}"
     elif task_type == "sticky":
         min_length = 2
         max_length = 12
@@ -968,24 +1315,13 @@ def train():
 
     # validation set
     test_lm_input = sample_generator.generate(batch_size * 10)
-    if task_type == "counting":
+
+    # add boundary samples for counting tasks (e.g. 99->100)
+    if task_type == "counting" or task_type == "counting_cot":
         assert isinstance(sample_generator, CountingSampleGenerator)
         boundary_samples = sample_generator.generate_boundary_samples()
         if boundary_samples.numel() > 0:
             test_lm_input = torch.cat([test_lm_input, boundary_samples], dim=0)
-
-    if task_type == "counting":
-        has_special_sample = False
-        for i in range(len(test_lm_input)):
-            s = sample_generator.pretty_to_str(test_lm_input[i])
-            input_part = s.split("<END_IN>")[0]
-            output_part = s.split("<END_IN>")[1]
-            last_input_num = int(input_part.split(',')[-1].replace(' ', ''))
-            first_output_num = int(output_part.split(',')[-1].replace(' ', '').replace('<END_OUT>', ''))
-            if len(str(last_input_num)) != len(str(first_output_num)):
-                print("Test Sample with different length output:", s)
-                has_special_sample = True
-        assert has_special_sample, "Test set should have at least one sample with different length output"
 
     # debug model for any bad samples
     if debug:
