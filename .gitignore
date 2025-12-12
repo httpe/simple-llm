@@ -2,3 +2,6 @@ venv/
 *.pyc
 
 *.pt
+
+saved_models/
+tmp/

@@ -6,10 +6,13 @@ import random
 import math
 import shutil
 import datetime
+from dataclasses import dataclass
 
 from .transformer import TransformerLM, TransformerBlock
 from .lm import MyGRU
 from . import sticky
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 ##############################################
 # Vocabulary / special tokens
@@ -58,17 +61,6 @@ class LMSampleGenerator:
 
     def pretty_to_str(self, sample: torch.Tensor) -> str:
         return str(sample.tolist())
-
-    def get_lm_output(self, lm_input: torch.Tensor) -> torch.Tensor:
-        '''
-        Given lm_input of shape [B, T], return lm_output of shape [B, T]
-        '''
-        B, T = lm_input.size()
-        lm_output = torch.full((B, T), PAD, dtype=torch.long, device=lm_input.device)
-        
-        lm_output[:, :-1] = lm_input[:, 1:].clone()
-
-        return lm_output
 
     def verify(self, predicted: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
         """
@@ -1094,8 +1086,47 @@ class WrappedTransformerLM(TransformerLM):
         return P_final
 
 # ============================================================
-# Greedy Decoding
+# Training Utilities
 # ============================================================
+
+def prepare_result_dir(result_dir: str, use_existing: bool):
+    if not use_existing and os.path.exists(result_dir):
+        # move to backup dir
+        backup_dir = result_dir + "_backup_" + datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        shutil.move(result_dir, backup_dir)
+        print("Moved existing model dir to backup:", backup_dir)
+    os.makedirs(result_dir, exist_ok=True)
+    # copy training and model scripts to model save dir for record
+    training_session_timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    script_name = training_session_timestamp + "_" + os.path.basename(__file__)
+    shutil.copy(__file__, os.path.join(result_dir, script_name))
+    lm_script_name = training_session_timestamp + "_lm.py"
+    shutil.copy(os.path.join(os.path.dirname(__file__), "lm.py"), os.path.join(result_dir, lm_script_name))
+    return training_session_timestamp
+
+def load_network_from_checkpoint(network: nn.Module, checkpoint_dir: str, device: str):
+    # find and load max step model
+    trained_step = 0
+    saved_models = os.listdir(checkpoint_dir) if os.path.exists(checkpoint_dir) else []
+    path = None
+    for fn in saved_models:
+        if fn.endswith(".pt"):
+            parts = fn.split("step_")
+            step = int(parts[1].split(".")[0])
+            if step > trained_step:
+                trained_step = step
+                path = os.path.join(checkpoint_dir, fn)
+    if path is not None:
+        network.load_state_dict(torch.load(path, map_location=device))
+        print("Loaded saved model from", path)
+    return trained_step
+
+def save_network_checkpoint(network: nn.Module, checkpoint_dir: str, step: int, training_session_timestamp: str):
+    if not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
+    path = os.path.join(checkpoint_dir, f"{training_session_timestamp}_step_{step}.pt")
+    torch.save(network.state_dict(), path)
+    print("Saved model to", path)
 
 def greedy_decode(model, lm_seq):
     B, S = lm_seq.size()
@@ -1151,11 +1182,6 @@ def greedy_decode(model, lm_seq):
 
     return outputs
 
-
-# ============================================================
-# Training Loop
-# ============================================================
-
 def debug_model(model, test_lm_input):
     global DEBUG_GROUND_TRUTH
     pred = greedy_decode(model, test_lm_input)
@@ -1171,41 +1197,76 @@ def debug_model(model, test_lm_input):
     greedy_decode(model, bad_sample)
     DEBUG_GROUND_TRUTH = None
 
+def validate_model(network: nn.Module, task: "LMTask"):
+    network.eval()
+    with torch.no_grad():
+        pred = greedy_decode(network, task.validation_set)
+        # show 3 good samples
+        correct = task.sample_generator.verify(pred, task.validation_set)
+        good_idx = correct.nonzero(as_tuple=True)[0]
+        for i in range(min(3, len(good_idx))):
+            print(f"Good Sample {i}:")
+            print("Sample:", task.sample_generator.pretty_to_str(task.validation_set[good_idx[i],:]))
+            print("Output:", task.sample_generator.pretty_to_str(pred[good_idx[i],:]))
+            print()
 
-def train():
-    # fix seeds
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
-    random.seed(42)
+        # show 3 bad samples:
+        bad = correct.logical_not()
+        bad_idx = bad.nonzero(as_tuple=True)[0]
+        for i in range(min(3, len(bad_idx))):
+            print(f"Bad Sample {i}:")
+            print("Sample:", task.sample_generator.pretty_to_str(task.validation_set[bad_idx[i],:]))
+            print("Output:", task.sample_generator.pretty_to_str(pred[bad_idx[i],:]))
+            print()
 
-    task_type = "counting_cot" # "copy" or "take_last" or "counting" or "counting_cot" or "sticky"
-    model_type = "ptrGen" # "ptrGen" or "tfPtrGen" or "tf"
+        # print test accuracy
+        n_correct = int(correct.sum().item())
+        n_total = correct.size(0)
+        validation_acc = n_correct / n_total
 
-    # training
-    batch_size = 128
-    num_steps = 10000
-    lr = 1e-3
-    use_cosine_lr_schedule = False
-    use_saved_model = False
-    save_model = True
-    debug = False
-    device = "cpu" # device = "cuda" if torch.cuda.is_available() else "cpu"
+    network.train()
 
-    # tasks
+    return n_correct, n_total, validation_acc
+
+def log_training_performance(result_dir: str, training_timestamp: str, step: int, loss: torch.Tensor, min_loss: float, n_correct: int, n_total: int, validation_acc: float, max_validation_acc: float):
+    perf_path = os.path.join(result_dir, f"training_performance.txt")
+    if not os.path.exists(perf_path):
+        with open(perf_path, "w") as f:
+            f.write("TrainSessionStartTime\tTimeStamp\tStep\tLoss\tMinLoss\tNCorrect\tNTotal\tValAcc\tMaxValAcc\n")
+    with open(perf_path, "a") as f:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        f.write(f"{training_timestamp}\t{timestamp}\t{step}\t{loss.item():.4f}\t{min_loss:.4f}\t{n_correct}\t{n_total}\t{validation_acc:.4f}\t{max_validation_acc:.4f}\n")
+
+
+# ============================================================
+# Task Initialization
+# ============================================================
+
+@dataclass
+class LMTask:
+    task_type: str
+    spec: str
     sample_generator: LMSampleGenerator
+    vocab_size: int
+    required_ctx_len: int
+    validation_set: torch.Tensor
+
+
+def init_task(task_type: str, validation_set_size: int) -> LMTask:
+    extra_validation_set = None
     if task_type == "copy":
         vocab_size = 15
         max_seq_len = 24
         sample_generator = CopySampleGenerator(max_seq_len, vocab_size)
-        model_max_context_size = max_seq_len * 2 # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
-        task_prefix = f"maxSeq{max_seq_len}"
-    elif task_type == "take_last":
+        required_ctx_len = max_seq_len * 2 # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
+        spec = f"maxSeq{max_seq_len}"
+    elif task_type == "takeLast":
         vocab_size = 15
         max_seq_len = 24
         max_separators = 3
         sample_generator = TakeLastSampleGenerator(max_seq_len, vocab_size, max_separators=max_separators)
-        model_max_context_size = max_seq_len * 2 # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
-        task_prefix = f"maxSeq{max_seq_len}_maxSep{max_separators}"
+        required_ctx_len = max_seq_len * 2 # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
+        spec = f"maxSeq{max_seq_len}_maxSep{max_separators}"
     elif task_type == "counting":
         min_digits = 1
         max_digits = 3
@@ -1213,17 +1274,21 @@ def train():
         max_count = 9
         sample_generator = CountingSampleGenerator(min_digits, max_digits, min_count, max_count)
         vocab_size = sample_generator.vocab_size
-        model_max_context_size = sample_generator.max_seq_len
-        task_prefix = f"minD{min_digits}_maxD{max_digits}_minC{min_count}_maxC{max_count}"
-    elif task_type == "counting_cot":
+        required_ctx_len = sample_generator.max_seq_len
+        spec = f"minD{min_digits}_maxD{max_digits}_minC{min_count}_maxC{max_count}"
+        # add boundary samples for counting tasks (e.g. 99->100)
+        extra_validation_set = sample_generator.generate_boundary_samples()
+    elif task_type == "countingCot":
         min_digits = 1
         max_digits = 3
         min_count = 2
         max_count = 9
         sample_generator = CountingCoTSampleGenerator(min_digits, max_digits, min_count, max_count)
         vocab_size = sample_generator.vocab_size
-        model_max_context_size = sample_generator.max_seq_len
-        task_prefix = f"cot_minD{min_digits}_maxD{max_digits}_minC{min_count}_maxC{max_count}"
+        required_ctx_len = sample_generator.max_seq_len
+        spec = f"minD{min_digits}_maxD{max_digits}_minC{min_count}_maxC{max_count}"
+        # add boundary samples for counting tasks (e.g. 99->100)
+        extra_validation_set = sample_generator.generate_boundary_samples()
     elif task_type == "sticky":
         min_length = 2
         max_length = 12
@@ -1231,108 +1296,139 @@ def train():
         strict = False
         sample_generator = StickySampleGenerator(min_length, max_length, stickiness, strict)
         vocab_size = sample_generator.vocab_size
-        model_max_context_size = sample_generator.max_seq_len
-        task_prefix = f"minL{min_length}_maxL{max_length}_sticky{stickiness}_{'strict' if strict else 'loose'}"
+        required_ctx_len = sample_generator.max_seq_len
+        spec = f"minL{min_length}_maxL{max_length}_sticky{stickiness}_{'strict' if strict else 'loose'}"
     else:
         raise ValueError("Unknown task_type")
-    
-    # models
+
+    # validation set
+    validation_set = sample_generator.generate(validation_set_size)
+    if extra_validation_set is not None and extra_validation_set.numel() > 0:
+        validation_set = torch.cat([validation_set, extra_validation_set], dim=0)
+
+    return LMTask(task_type, spec, sample_generator, vocab_size, required_ctx_len, validation_set)
+
+# ============================================================
+# Model Initialization
+# ============================================================
+@dataclass
+class LanguageModel:
+    model_type: str
+    spec: str
+    network: nn.Module
+    vocab_size: int
+    max_ctx_len: int
+
+
+def init_model(model_type: str, task: LMTask) -> LanguageModel:
     if model_type == "ptrGen":
         d_model = 32
-        model = PointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size).to(device)
-        model_prefix = f"ptrGen_rawInputPassThrough_posAttn_resLayerNormGRU"
+        num_layers = 1
+        vocab_size = task.vocab_size
+        max_ctx_len = task.required_ctx_len
+        network = PointerGeneratorLM(task.vocab_size, d_model, max_len=max_ctx_len)
+        model_type = f"ptrGen_rawInputPassThrough_posAttn_resLayerNormGRU"
+        spec = f"dim{d_model} "
     elif model_type == "tfPtrGen":
         d_model = 32
         n_head = 2
         num_layers = 1
-        model = TransformerPointerGeneratorLM(vocab_size, d_model, max_len=model_max_context_size, n_head=n_head, num_layers=num_layers).to(device)
-        model_prefix = f"tfPtrGen_tfHead{n_head}_tfLayer{num_layers}"
+        vocab_size = task.vocab_size
+        max_ctx_len = task.required_ctx_len
+        network = TransformerPointerGeneratorLM(task.vocab_size, d_model, max_len=max_ctx_len, n_head=n_head, num_layers=num_layers)
+        model_type = "tfPtrGen"
+        spec = f"dim{d_model}_head{n_head}_layer{num_layers}"
     elif model_type == "tf":
         d_model =  24
         n_head = 2
         num_layers = 3
-        model = WrappedTransformerLM(vocab_size, d_model, max_context_size=model_max_context_size, n_heads=n_head, n_layer=num_layers, head_size=None, ff_hidden_size=None).to(device)
-        model_prefix = f"tf_tfHead{n_head}_tfLayer{num_layers}"
+        vocab_size = task.vocab_size
+        max_ctx_len = task.required_ctx_len
+        network = WrappedTransformerLM(task.vocab_size, d_model, max_context_size=max_ctx_len, n_heads=n_head, n_layer=num_layers, head_size=None, ff_hidden_size=None)
+        model_type = "tf"
+        spec = f"dim{d_model}_head{n_head}_layer{num_layers}"
     else:
         raise ValueError("Unknown model_type")
     
-    # print model parameter count
-    num_params = sum(p.numel() for p in model.parameters())
-    print(f"Model Parameter Count: {num_params}")
+    n_params = sum(p.numel() for p in network.parameters())
+    print(f"Model Parameter Count: {n_params}")
+    spec = f"{spec}_vocab{vocab_size}_maxCtx{max_ctx_len}_params{n_params}"
 
-    model_desc = f"{model_prefix}_vocab{vocab_size}_dModel{d_model}_maxCtx{model_max_context_size}_params{num_params}"
-    result_dir = f"./simplellm/lm/saved_models/{task_type}/{task_prefix}/{model_desc}"
+    return LanguageModel(model_type, spec, network, vocab_size, max_ctx_len)
+
+
+# ============================================================
+# Training Loop
+# ============================================================
+
+
+def train():
+    # fix seeds
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+    random.seed(42)
+
+
+    ### training hyperparameters
+    
+
+    task_type = "copy" # "copy" or "takeLast" or "counting" or "countingCot" or "sticky"
+    model_type = "ptrGen" # "ptrGen" or "tfPtrGen" or "tf"
+    device = "cpu" # device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    use_saved_model = False
+    save_results = True
+    
+    batch_size = 128
+    total_training_steps = 10000
+    lr = 1e-3
+    use_cosine_lr_schedule = False
+    validation_set_size = 256
+
+    debug = False
+    
+
+    ### training setup
+
+
+    task = init_task(task_type, validation_set_size)
+    model = init_model(model_type, task)
+    model.network.to(device)
+
+    result_dir = f"{SCRIPT_DIR}/saved_models/{task.task_type}/{task.spec}/{model.model_type}/{model.spec}"
     checkpoint_dir = os.path.join(result_dir, "checkpoints")
 
-    if not use_saved_model and save_model:
-        if os.path.exists(result_dir):
-            # move to backup dir
-            backup_dir = result_dir + "_backup_" + datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-            shutil.move(result_dir, backup_dir)
-            print("Moved existing model dir to backup:", backup_dir)
-
-    # copy this file to model save dir for record
-    if save_model:
-        if not os.path.exists(result_dir):
-            os.makedirs(result_dir)
-        if not os.path.exists(checkpoint_dir):
-            os.makedirs(checkpoint_dir)
-        training_timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        script_name = training_timestamp + "_" + os.path.basename(__file__)
-        shutil.copy(__file__, os.path.join(result_dir, script_name))
-        lm_script_name = training_timestamp + "_lm.py"
-        shutil.copy(os.path.join(os.path.dirname(__file__), "lm.py"), os.path.join(result_dir, lm_script_name))
-
-    # find and load max step model
-    max_step = 0
+    trained_step = 0
     if use_saved_model:
-        saved_models = os.listdir(checkpoint_dir) if os.path.exists(checkpoint_dir) else []
-        path = None
-        for fn in saved_models:
-            if fn.endswith(".pt"):
-                parts = fn.split("step_")
-                step = int(parts[1].split(".")[0])
-                if step > max_step:
-                    max_step = step
-                    path = os.path.join(checkpoint_dir, fn)
-        if path is not None:
-            model.load_state_dict(torch.load(path, map_location=device))
-            print("Loaded saved model from", path)
+        trained_step = load_network_from_checkpoint(model.network, checkpoint_dir, device)
 
-    # optimizer and loss
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-    # Cosine LR decay from lr -> 0 over total steps (accounts for resumed max_step)
-    start_step = max_step
-    total_steps = num_steps
-    def cosine_lambda(step_idx: int):
-        if not use_cosine_lr_schedule:
-            return 1.0
-        progress = min(start_step + step_idx, total_steps)
-        return 0.5 * (1 + math.cos(math.pi * progress / total_steps))
-    scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=cosine_lambda)
+    if save_results:
+        training_session_timestamp = prepare_result_dir(result_dir, use_existing=use_saved_model)
+
     # use NLLLoss  when model output is probabilities, use CrossEntropyLoss when model output is logits
     criterion = nn.NLLLoss(ignore_index=PAD)
 
-    # validation set
-    test_lm_input = sample_generator.generate(batch_size * 10)
+    # Adam optimizer
+    optimizer = torch.optim.Adam(model.network.parameters(), lr=lr)
 
-    # add boundary samples for counting tasks (e.g. 99->100)
-    if task_type == "counting" or task_type == "counting_cot":
-        assert isinstance(sample_generator, CountingSampleGenerator)
-        boundary_samples = sample_generator.generate_boundary_samples()
-        if boundary_samples.numel() > 0:
-            test_lm_input = torch.cat([test_lm_input, boundary_samples], dim=0)
+    # Cosine LR decay from lr -> 0 over total steps (accounts for resumed max_step)
+    def cosine_lambda(step_idx: int):
+        if not use_cosine_lr_schedule:
+            return 1.0
+        progress = min(trained_step + step_idx, total_training_steps)
+        return 0.5 * (1 + math.cos(math.pi * progress / total_training_steps))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=cosine_lambda)
 
     # debug model for any bad samples
     if debug:
-        model.eval()
+        model.network.eval()
         with torch.no_grad():
-            debug_model(model, test_lm_input)
-        model.train()
+            debug_model(model, task.validation_set)
+        model.network.train()
 
-    # LR scheduler: step down LR by 10x when validation acc > 90%
-    # validation_acc = 0.0
-    # lr_stepped_down = False
+
+    ### training loop
+
 
     print("Starting training...")
     print("------------------------------------")
@@ -1340,75 +1436,40 @@ def train():
     min_loss = float('inf')
     max_validation_acc = 0.0
 
-    for step in range(max_step + 1, num_steps+1):
-        lm_input = sample_generator.generate(batch_size)
-        lm_output = sample_generator.get_lm_output(lm_input)
+    for step in range(trained_step + 1, total_training_steps+1):
+        # generate training batch
+        training_input = task.sample_generator.generate(batch_size)
 
-        P_final = model(lm_input)   # [B, T, V]
+        training_output = torch.full(training_input.size(), PAD, dtype=torch.long, device=training_input.device)
+        training_output[:, :-1] = training_input[:, 1:].clone()
+        
+        training_input = training_input.to(device)
+        training_output = training_output.to(device)
+
+        # infer next token distribution
+        p_predicted = model.network(training_input)   # [B, T, V]
 
         # clamp for numerical stability and use NLL on log-probs
-        log_p = torch.log(P_final.clamp(min=1e-12))
+        log_p = torch.log(p_predicted.clamp(min=1e-12))
 
-        loss = criterion(log_p.reshape(-1, vocab_size), lm_output.reshape(-1))
+        loss = criterion(log_p.reshape(-1, log_p.size(-1)), training_output.reshape(-1))
 
-        opt.zero_grad()
+        optimizer.zero_grad()
         loss.backward()
-        opt.step()
+        optimizer.step()
         scheduler.step()
 
-        # if validation_acc > 0.95 and not lr_stepped_down:
-        #     for param_group in opt.param_groups:
-        #         param_group['lr'] = lr * 0.1
-        #     lr_stepped_down = True
-        #     print("Stepped down learning rate to", param_group['lr'])
-
         if step % 200 == 0:
-            model.eval()
-            with torch.no_grad():
-                pred = greedy_decode(model, test_lm_input)
-
-                # show 3 good samples
-                correct = sample_generator.verify(pred, test_lm_input)
-                good_idx = correct.nonzero(as_tuple=True)[0]
-                for i in range(min(3, len(good_idx))):
-                    print(f"Good Sample {i}:")
-                    print("Sample:", sample_generator.pretty_to_str(test_lm_input[good_idx[i],:]))
-                    print("Output:", sample_generator.pretty_to_str(pred[good_idx[i],:]))
-                    print()
-
-                # show 3 bad samples:
-                bad = correct.logical_not()
-                bad_idx = bad.nonzero(as_tuple=True)[0]
-                for i in range(min(3, len(bad_idx))):
-                    print(f"Bad Sample {i}:")
-                    print("Sample:", sample_generator.pretty_to_str(test_lm_input[bad_idx[i],:]))
-                    print("Output:", sample_generator.pretty_to_str(pred[bad_idx[i],:]))
-                    print()
-
-                # print test accuracy
-                n_correct = correct.sum().item()
-                n_total = correct.size(0)
-                validation_acc = n_correct / n_total
-                print(f"Validation Accuracy: Prev Max = {max_validation_acc:.4f}, Curr = {validation_acc:.4f} ({n_correct}/{n_total})")
-                max_validation_acc = max(max_validation_acc, validation_acc)
-
-            model.train()
+            n_correct, n_total, validation_acc = validate_model(model.network, task)
+            print(f"Validation Accuracy: Prev Max = {max_validation_acc:.4f}, Curr = {validation_acc:.4f} ({n_correct}/{n_total})")
+            max_validation_acc = max(max_validation_acc, validation_acc)
 
             print(f"Step {step}, Loss: Prev Min = {min_loss:.4f}, Curr = {loss.item():.4f}")
             min_loss = min(min_loss, loss.item())
 
-            if save_model:
-                path = os.path.join(checkpoint_dir, f"{training_timestamp}_step_{step}.pt")
-                torch.save(model.state_dict(), path)
-                print("Saved model to", path)
-
-                # performance
-                perf_path = os.path.join(result_dir, f"training_performance.txt")
-                if not os.path.exists(perf_path):
-                    with open(perf_path, "w") as f:
-                        f.write("TrainStartTime\tStep\tLoss\tMinLoss\tNCorrect\tNTotal\tValAcc\tMaxValAcc\n")
-                with open(perf_path, "a") as f:
-                    f.write(f"{training_timestamp}\t{step}\t{loss.item():.4f}\t{min_loss:.4f}\t{n_correct}\t{n_total}\t{validation_acc:.4f}\t{max_validation_acc:.4f}\n")
+            if save_results:
+                save_network_checkpoint(model.network, checkpoint_dir, step, training_session_timestamp)
+                log_training_performance(result_dir, training_session_timestamp, step, loss, min_loss, n_correct, n_total, validation_acc, max_validation_acc)
 
             print("------------------------------------")
             print("")
