@@ -220,7 +220,6 @@ class CountingSampleGenerator(LMSampleGenerator):
         return self._build_sample(count, start)
 
     def _build_sample(self, count: int, start: int) -> list[int]:
-        assert count >= 2, "count must be at least 2"
         assert start >= self.min_start, "start below allowed min_start"
         assert start + count <= self.max_number, "start + count exceeds max_number"
 
@@ -365,8 +364,14 @@ class CountingCoTSampleGenerator(CountingSampleGenerator):
     def _digits_from_int(self, value: int) -> list[int]:
         return [int(d) for d in str(value)]
 
+    def _digits_from_int_reversed(self, value: int) -> list[int]:
+        return [int(d) for d in reversed(str(value))]
+
     def _encode_digits(self, digits: list[int]) -> list[int]:
         return [FIRST_TOKEN + d for d in digits]
+
+    def _encode_number_reversed(self, value: int) -> list[int]:
+        return self._encode_digits(self._digits_from_int_reversed(value))
 
     def _digits_with_marker(self, value: int, marker: int | None = None, *, position: str = "after", digit_index: int | None = None) -> list[int]:
         """
@@ -384,6 +389,26 @@ class CountingCoTSampleGenerator(CountingSampleGenerator):
         idx = len(tokens) - 1 if digit_index is None else max(0, min(len(tokens) - 1, digit_index))
         insert_at = idx if position == "before" else idx + 1
         return tokens[:insert_at] + [marker] + tokens[insert_at:]
+
+    def _think_tokens_with_marker_from_digits(self, digits_rev: list[int], marker: int | None, *, position: str = "after", digit_index: int | None = None) -> list[int]:
+        tokens = self._encode_digits(digits_rev)
+        if marker is None:
+            return tokens
+        if len(tokens) == 0:
+            return [marker]
+        assert position in {"before", "after"}, "position must be 'before' or 'after'"
+        idx = 0 if digit_index is None else max(0, min(len(tokens) - 1, digit_index))
+        insert_at = idx if position == "before" else idx + 1
+        return tokens[:insert_at] + [marker] + tokens[insert_at:]
+
+    def _think_digits_with_marker(self, value: int, marker: int | None = None, *, position: str = "after", digit_index: int | None = None) -> list[int]:
+        return self._think_tokens_with_marker_from_digits(self._digits_from_int_reversed(value), marker, position=position, digit_index=digit_index)
+
+    def _think_tokens_from_digits(self, digits_rev: list[int]) -> list[int]:
+        return self._encode_digits(digits_rev)
+
+    def _think_tokens(self, value: int) -> list[int]:
+        return self._think_tokens_from_digits(self._digits_from_int_reversed(value))
 
     def _build_step_tokens(self, counter_tokens: list[int], number_tokens: list[int]) -> list[int]:
         """
@@ -410,6 +435,7 @@ class CountingCoTSampleGenerator(CountingSampleGenerator):
         Build intermediate carry steps turning trailing 9s into 0s one digit at a time.
         Example: 99 -> steps: [9 <INC> 0], [<INC> 0 0]
         """
+        # Not used in reversed-digit CoT; preserved for reference
         run_len = self._carry_run_length(prev_digits)
         if run_len == 0:
             return []
@@ -422,6 +448,29 @@ class CountingCoTSampleGenerator(CountingSampleGenerator):
             zeros_after = run_len - (offset + 1)
             number_tokens = self._encode_digits(prefix) + [INC, FIRST_TOKEN + 0] + [FIRST_TOKEN + 0] * zeros_after
             steps.append(self._build_step_tokens(self._encode_number(remaining_after), number_tokens))
+
+        return steps
+
+    def _build_carry_steps_reversed(self, remaining_after: int, prev_digits_rev: list[int]) -> list[list[int]]:
+        """
+        Carry steps for reversed-digit CoT: turn trailing 9s to 0s one at a time with INC
+        markers applied after the digit that changed.
+        Example (reversed): [9,9] -> steps: [0 <INC> 9], [0 0 <INC>]
+        """
+        run_len = 0
+        for d in prev_digits_rev:
+            if d == 9:
+                run_len += 1
+            else:
+                break
+        if run_len == 0:
+            return []
+
+        steps: list[list[int]] = []
+        for idx in range(run_len):
+            digits = [0] * (idx + 1) + prev_digits_rev[idx + 1 :]
+            number_tokens = self._think_tokens_with_marker_from_digits(digits, INC, position="after", digit_index=idx)
+            steps.append(self._build_step_tokens(self._think_tokens(remaining_after), number_tokens))
 
         return steps
 
@@ -443,16 +492,17 @@ class CountingCoTSampleGenerator(CountingSampleGenerator):
 
             prev_digits = self._digits_from_int(current)
             next_digits = self._digits_from_int(next_value)
+            prev_digits_rev = list(reversed(prev_digits))
 
-            action_counter = self._digits_with_marker(remaining, DEC)
-            action_number = self._digits_with_marker(current, INC)
+            action_counter = self._think_digits_with_marker(remaining, DEC, position="before", digit_index=0)
+            action_number = self._think_digits_with_marker(current, INC, position="before", digit_index=0)
             steps.append(self._build_step_tokens(action_counter, action_number))
 
             if self._needs_carry(current):
-                steps.extend(self._build_carry_steps(remaining_after, prev_digits))
+                steps.extend(self._build_carry_steps_reversed(remaining_after, prev_digits_rev))
 
-            state_counter = self._encode_number(remaining_after)
-            state_number = self._encode_number(next_value)
+            state_counter = self._think_tokens(remaining_after)
+            state_number = self._think_tokens(next_value)
             steps.append(self._build_step_tokens(state_counter, state_number))
 
             current = next_value
@@ -506,7 +556,6 @@ class CountingCoTSampleGenerator(CountingSampleGenerator):
         if start is None:
             start = self._sample_start(count)
 
-        assert count >= 2, "count must be at least 2"
         assert start >= self.min_start, "start below allowed min_start"
         assert start + count <= self.max_number, "start + count exceeds max_number"
 
@@ -543,12 +592,13 @@ class CountingCoTSampleGenerator(CountingSampleGenerator):
         positional embeddings. Uses an analytic bound and also samples a few
         representative starts near digit boundaries.
         """
+        max_digits = self.max_digits
         max_count_digits = len(str(self.max_count))
-        tokens_per_step_upper = max_count_digits + self.max_digits + 2  # counter digits + SEP + digits + optional marker
-        max_steps_per_number = 2 + self.max_digits  # action + state + one per trailing 9 (worst-case)
+        tokens_per_step_upper = max_count_digits + max_digits + 2  # counter digits + SEP + digits + optional marker
+        max_steps_per_number = 2 + max_digits  # action + state + one per trailing 9 (worst-case)
         think_tokens_per_number = (max_steps_per_number * tokens_per_step_upper) + (max_steps_per_number - 1)  # STEP separators
-        header_tokens = 1 + max_count_digits + 1 + self.max_digits + 1  # BOS + count + SEP + start + END_IN
-        output_tokens = (self.max_count * self.max_digits) + (self.max_count - 1) + 1  # outputs + SEP + END_OUT
+        header_tokens = 1 + max_count_digits + 1 + max_digits + 1  # BOS + count + SEP + start + END_IN
+        output_tokens = (self.max_count * max_digits) + (self.max_count - 1) + 1  # outputs + SEP + END_OUT
         analytic_bound = header_tokens + 1 + (self.max_count * think_tokens_per_number) + 1 + output_tokens  # START/END_THINK
 
         candidates: list[int] = [analytic_bound]
@@ -559,7 +609,7 @@ class CountingCoTSampleGenerator(CountingSampleGenerator):
                 self.max_number - count
             }
             # include boundary starts near powers of 10 to induce carries
-            for d in range(1, self.max_digits + 1):
+            for d in range(1, max_digits + 1):
                 for delta in [0, 1]:
                     s = (10 ** d) - count - delta
                     if s < self.min_start:
