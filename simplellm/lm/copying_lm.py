@@ -1178,6 +1178,18 @@ def save_network_checkpoint(network: nn.Module, checkpoint_dir: str, step: int, 
     torch.save(network.state_dict(), path)
     print("Saved model to", path)
 
+def pad_to_len(tensor: torch.Tensor, target_len: int, pad_token: int = PAD) -> torch.Tensor:
+    """
+    Pad (or return) a [B, T] tensor to [B, target_len] with pad_token.
+    """
+    B, T = tensor.size()
+    if T == target_len:
+        return tensor
+    assert T < target_len, "pad_to_len only supports padding to a longer length"
+    padded = torch.full((B, target_len), pad_token, dtype=tensor.dtype, device=tensor.device)
+    padded[:, :T] = tensor
+    return padded
+
 def greedy_decode(model, lm_seq):
     B, S = lm_seq.size()
     device = lm_seq.device
@@ -1249,15 +1261,19 @@ def debug_model(model, test_lm_input):
 
 def validate_model(network: nn.Module, task: "LMTask"):
     network.eval()
+    if task.extended_generator is not None:
+        generator = task.extended_generator
+    else:
+        generator = task.generator
     with torch.no_grad():
         pred = greedy_decode(network, task.validation_set)
         # show 3 good samples
-        correct = task.sample_generator.verify(pred, task.validation_set)
+        correct = generator.verify(pred, task.validation_set)
         good_idx = correct.nonzero(as_tuple=True)[0]
         for i in range(min(3, len(good_idx))):
             print(f"Good Sample {i}:")
-            print("Sample:", task.sample_generator.pretty_to_str(task.validation_set[good_idx[i],:]))
-            print("Output:", task.sample_generator.pretty_to_str(pred[good_idx[i],:]))
+            print("Sample:", generator.pretty_to_str(task.validation_set[good_idx[i],:]))
+            print("Output:", generator.pretty_to_str(pred[good_idx[i],:]))
             print()
 
         # show 3 bad samples:
@@ -1265,8 +1281,8 @@ def validate_model(network: nn.Module, task: "LMTask"):
         bad_idx = bad.nonzero(as_tuple=True)[0]
         for i in range(min(3, len(bad_idx))):
             print(f"Bad Sample {i}:")
-            print("Sample:", task.sample_generator.pretty_to_str(task.validation_set[bad_idx[i],:]))
-            print("Output:", task.sample_generator.pretty_to_str(pred[bad_idx[i],:]))
+            print("Sample:", generator.pretty_to_str(task.validation_set[bad_idx[i],:]))
+            print("Output:", generator.pretty_to_str(pred[bad_idx[i],:]))
             print()
 
         # print test accuracy
@@ -1274,9 +1290,36 @@ def validate_model(network: nn.Module, task: "LMTask"):
         n_total = correct.size(0)
         validation_acc = n_correct / n_total
 
+        if task.extended_validation_set is not None:
+            validate_model_extended(network, task)
+
     network.train()
 
     return n_correct, n_total, validation_acc
+
+
+def validate_model_extended(network: nn.Module, task: "LMTask") -> None:
+    print("Evaluating on extended digit length samples...")
+    extended_samples = task.extended_validation_set
+    if extended_samples is None:
+        return
+    assert task.further_extended_generator is not None, "Task does not have a further extended sample generator"
+    for i in range(extended_samples.size(0)):
+        print("Extended Sample:", task.further_extended_generator.pretty_to_str(extended_samples[i]))
+    network.eval()
+    with torch.no_grad():
+        pred = greedy_decode(network, extended_samples)
+        print("Extended Samples Prediction:")
+        for i in range(extended_samples.size(0)):
+            print("Sample:", task.further_extended_generator.pretty_to_str(extended_samples[i]))
+            print("Output:", task.further_extended_generator.pretty_to_str(pred[i]))
+            print()
+        correct = task.further_extended_generator.verify(pred, extended_samples)
+        n_correct = correct.sum().item()
+        n_total = correct.size(0)
+        ext_validation_acc = n_correct / n_total
+        print(f"Extended Validation Accuracy: {ext_validation_acc:.4f} ({n_correct}/{n_total})")
+    network.train()
 
 def log_training_performance(result_dir: str, training_timestamp: str, step: int, loss: torch.Tensor, min_loss: float, n_correct: int, n_total: int, validation_acc: float, max_validation_acc: float):
     perf_path = os.path.join(result_dir, f"training_performance.txt")
@@ -1296,25 +1339,46 @@ def log_training_performance(result_dir: str, training_timestamp: str, step: int
 class LMTask:
     task_type: str
     spec: str
-    sample_generator: LMSampleGenerator
+    generator: LMSampleGenerator
     vocab_size: int
     required_ctx_len: int
     validation_set: torch.Tensor
+    extended_generator: LMSampleGenerator | None = None
+    further_extended_generator: LMSampleGenerator | None = None
+    extended_validation_set: torch.Tensor | None = None
 
+    def generate_mixed_samples(self, max_ctx_len: int, batch_size: int, extended_fraction: float = 0.0) -> torch.Tensor:
+        if extended_fraction == 0:
+            return pad_to_len(self.generator.generate(batch_size), max_ctx_len)
+        assert self.extended_generator is not None, "Task does not have an extended sample generator"
+        base_size = max(1, int(batch_size * (1 - extended_fraction)))
+        ext_size = max(0, batch_size - base_size)
+        base_samples = self.generator.generate(base_size)
+        batches = [pad_to_len(base_samples, max_ctx_len)]
+        if ext_size > 0:
+            ext_samples = self.extended_generator.generate(ext_size)
+            batches.append(pad_to_len(ext_samples, max_ctx_len))
+        lm_input = torch.cat(batches, dim=0)
+        perm = torch.randperm(lm_input.size(0))
+        return lm_input[perm]
+    
 
 def init_task(task_type: str, validation_set_size: int) -> LMTask:
     extra_validation_set = None
+    extended_generator = None
+    extended_validation_set = None
+    further_extended_generator = None
     if task_type == "copy":
         vocab_size = 15
         max_seq_len = 24
-        sample_generator = CopySampleGenerator(max_seq_len, vocab_size)
+        generator = CopySampleGenerator(max_seq_len, vocab_size)
         required_ctx_len = max_seq_len * 2 # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
         spec = f"maxSeq{max_seq_len}"
     elif task_type == "takeLast":
         vocab_size = 15
         max_seq_len = 24
         max_separators = 3
-        sample_generator = TakeLastSampleGenerator(max_seq_len, vocab_size, max_separators=max_separators)
+        generator = TakeLastSampleGenerator(max_seq_len, vocab_size, max_separators=max_separators)
         required_ctx_len = max_seq_len * 2 # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
         spec = f"maxSeq{max_seq_len}_maxSep{max_separators}"
     elif task_type == "counting":
@@ -1322,41 +1386,52 @@ def init_task(task_type: str, validation_set_size: int) -> LMTask:
         max_digits = 3
         min_count = 2
         max_count = 9
-        sample_generator = CountingSampleGenerator(min_digits, max_digits, min_count, max_count)
-        vocab_size = sample_generator.vocab_size
-        required_ctx_len = sample_generator.max_seq_len
+        generator = CountingSampleGenerator(min_digits, max_digits, min_count, max_count)
+        vocab_size = generator.vocab_size
+        required_ctx_len = generator.max_seq_len
         spec = f"minD{min_digits}_maxD{max_digits}_minC{min_count}_maxC{max_count}"
         # add boundary samples for counting tasks (e.g. 99->100)
-        extra_validation_set = sample_generator.generate_boundary_samples()
+        extra_validation_set = generator.generate_boundary_samples()
     elif task_type == "countingCot":
         min_digits = 1
         max_digits = 3
         min_count = 2
-        max_count = 9
-        sample_generator = CountingCoTSampleGenerator(min_digits, max_digits, min_count, max_count)
-        vocab_size = sample_generator.vocab_size
-        required_ctx_len = sample_generator.max_seq_len
+        max_count = 4
+        training_extend_digits = 1
+        eval_extend_digits = 2
+        generator = CountingCoTSampleGenerator(min_digits, max_digits, min_count, max_count)
+        vocab_size = generator.vocab_size
+        required_ctx_len = generator.max_seq_len
+        if training_extend_digits > 0:
+            extended_generator = CountingCoTSampleGenerator(min_digits, max_digits + training_extend_digits, min_count, max_count)
+            required_ctx_len = max(required_ctx_len, extended_generator.max_seq_len)
+        if eval_extend_digits > 0:
+            further_extended_generator = CountingCoTSampleGenerator(min_digits, max_digits + eval_extend_digits, min_count, max_count)
+            extended_validation_set = further_extended_generator.generate(2)
+            extended_eval_boundary_set = further_extended_generator.generate_boundary_samples()
+            if extended_eval_boundary_set.numel() > 0:
+                extended_validation_set = torch.cat([extended_validation_set, extended_eval_boundary_set], dim=0)
         spec = f"minD{min_digits}_maxD{max_digits}_minC{min_count}_maxC{max_count}"
         # add boundary samples for counting tasks (e.g. 99->100)
-        extra_validation_set = sample_generator.generate_boundary_samples()
+        extra_validation_set = generator.generate_boundary_samples()
     elif task_type == "sticky":
         min_length = 2
         max_length = 12
         stickiness = 1
         strict = False
-        sample_generator = StickySampleGenerator(min_length, max_length, stickiness, strict)
-        vocab_size = sample_generator.vocab_size
-        required_ctx_len = sample_generator.max_seq_len
+        generator = StickySampleGenerator(min_length, max_length, stickiness, strict)
+        vocab_size = generator.vocab_size
+        required_ctx_len = generator.max_seq_len
         spec = f"minL{min_length}_maxL{max_length}_sticky{stickiness}_{'strict' if strict else 'loose'}"
     else:
         raise ValueError("Unknown task_type")
 
     # validation set
-    validation_set = sample_generator.generate(validation_set_size)
+    validation_set = generator.generate(validation_set_size)
     if extra_validation_set is not None and extra_validation_set.numel() > 0:
         validation_set = torch.cat([validation_set, extra_validation_set], dim=0)
 
-    return LMTask(task_type, spec, sample_generator, vocab_size, required_ctx_len, validation_set)
+    return LMTask(task_type, spec, generator, vocab_size, required_ctx_len, validation_set, extended_generator, further_extended_generator,  extended_validation_set)
 
 # ============================================================
 # Model Initialization
@@ -1420,9 +1495,9 @@ def train():
 
 
     ### training hyperparameters
-    
 
-    task_type = "copy" # "copy" or "takeLast" or "counting" or "countingCot" or "sticky"
+
+    task_type = "countingCot" # "copy" or "takeLast" or "counting" or "countingCot" or "sticky"
     model_type = "ptrGen" # "ptrGen" or "tfPtrGen" or "tf"
     device = "cpu" # device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -1434,6 +1509,8 @@ def train():
     lr = 1e-3
     use_cosine_lr_schedule = False
     validation_set_size = 256
+
+    extended_fraction = 0.2  # fraction of extended samples in each training batch (for tasks that support it)
 
     debug = False
     
@@ -1488,7 +1565,7 @@ def train():
 
     for step in range(trained_step + 1, total_training_steps+1):
         # generate training batch
-        training_input = task.sample_generator.generate(batch_size)
+        training_input = task.generate_mixed_samples(model.max_ctx_len, batch_size, extended_fraction=extended_fraction)  # [B, T]
 
         training_output = torch.full(training_input.size(), PAD, dtype=torch.long, device=training_input.device)
         training_output[:, :-1] = training_input[:, 1:].clone()
