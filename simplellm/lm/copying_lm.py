@@ -69,6 +69,146 @@ class LMSampleGenerator:
         """
         return (predicted == reference).all(dim=1)
 
+class IncrementSampleGenerator(LMSampleGenerator):
+    """
+    Samples of the form:
+    [BOS, <digits of n>, END_IN, <digits of n+1>, END_OUT]
+    """
+    def __init__(self, min_digits: int, max_digits: int):
+        assert min_digits > 0, "min_digits must be > 0"
+        assert max_digits >= min_digits, "max_digits must be >= min_digits"
+        self.min_digits = min_digits
+        self.max_digits = max_digits
+        self.min_start = 0 if self.min_digits == 1 else 10 ** (self.min_digits - 1)
+        self.max_number = 10 ** self.max_digits - 1
+        self.max_seq_len = (
+            1  # BOS
+            + self.max_digits  # input digits
+            + 1  # END_IN
+            + (self.max_digits + 1)  # output digits (may grow by one due to carry)
+            + 1  # END_OUT
+        )
+
+    @property
+    def vocab_size(self):
+        return FIRST_TOKEN + 10  # digits 0-9
+
+    def _encode_number(self, value: int) -> list[int]:
+        return [FIRST_TOKEN + int(d) for d in str(value)]
+
+    @staticmethod
+    def _parse_number(token_seq: torch.Tensor) -> int | None:
+        digits: list[int] = []
+        for tok in token_seq.tolist():
+            if tok == PAD:
+                break
+            if tok < FIRST_TOKEN:
+                return None
+            digit = tok - FIRST_TOKEN
+            if digit < 0 or digit > 9:
+                return None
+            digits.append(digit)
+        if len(digits) == 0:
+            return None
+        return int("".join(str(d) for d in digits))
+
+    def _build_sample(self, value: int) -> list[int]:
+        sample = [BOS]
+        sample.extend(self._encode_number(value))
+        sample.append(END_IN)
+        sample.extend(self._encode_number(value + 1))
+        sample.append(END_OUT)
+        assert len(sample) <= self.max_seq_len, "Sample longer than configured max_seq_len"
+        return sample
+
+    def _generate_single_sample(self) -> list[int]:
+        value = random.randint(self.min_start, self.max_number)
+        return self._build_sample(value)
+
+    def generate(self, batch_size: int) -> torch.Tensor:
+        samples = torch.full((batch_size, self.max_seq_len), PAD, dtype=torch.long)
+        for i in range(batch_size):
+            sample = self._generate_single_sample()
+            samples[i, :len(sample)] = torch.tensor(sample, dtype=torch.long)
+        return samples
+
+    def pretty_to_str(self, sample: torch.Tensor) -> str:
+        token_to_str = {
+            PAD: "",
+            BOS: "",
+            END_IN: "<END_IN>",
+            END_OUT: "<END_OUT>",
+        }
+        s: list[str] = []
+        for token in sample:
+            token_int = int(token.item())
+            if token_int in token_to_str:
+                s.append(token_to_str[token_int])
+            elif FIRST_TOKEN <= token_int < FIRST_TOKEN + 10:
+                s.append(str(token_int - FIRST_TOKEN))
+            else:
+                s.append(f"?{token_int}")
+        return " ".join(s)
+
+    def verify(self, predicted: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+        """
+        Correct if the model outputs n+1 after END_IN and then END_OUT, with only PAD afterwards.
+        """
+        assert predicted.shape == reference.shape
+        B, _ = predicted.shape
+        device = predicted.device
+        results = torch.zeros(B, dtype=torch.bool, device=device)
+
+        for i in range(B):
+            ref_seq = reference[i]
+            pred_seq = predicted[i]
+
+            end_in_positions = (ref_seq == END_IN).nonzero(as_tuple=True)[0]
+            if len(end_in_positions) == 0:
+                continue
+            end_in_idx = int(end_in_positions[0].item())
+
+            input_value = self._parse_number(ref_seq[1:end_in_idx])  # skip BOS
+            if input_value is None:
+                continue
+
+            expected_output_tokens = self._encode_number(input_value + 1)
+
+            post_end_in = pred_seq[end_in_idx + 1 :]
+            end_out_positions = (post_end_in == END_OUT).nonzero(as_tuple=True)[0]
+            if len(end_out_positions) == 0:
+                continue
+            end_out_rel = int(end_out_positions[0].item())
+
+            predicted_output_tokens = post_end_in[:end_out_rel].tolist()
+            if predicted_output_tokens != expected_output_tokens:
+                continue
+
+            trailing = post_end_in[end_out_rel + 1 :]
+            if (trailing == PAD).all():
+                results[i] = True
+
+        return results
+
+    def generate_boundary_samples(self) -> torch.Tensor:
+        """
+        Deterministic boundary cases (e.g., 9->10, 99->100) within the configured digit range.
+        """
+        samples: list[list[int]] = []
+        for digits in range(self.min_digits, self.max_digits + 1):
+            value = (10 ** digits) - 1
+            if value < self.min_start or value > self.max_number:
+                continue
+            samples.append(self._build_sample(value))
+
+        if len(samples) == 0:
+            return torch.empty((0, self.max_seq_len), dtype=torch.long)
+
+        tensor_samples = torch.full((len(samples), self.max_seq_len), PAD, dtype=torch.long)
+        for i, s in enumerate(samples):
+            tensor_samples[i, :len(s)] = torch.tensor(s, dtype=torch.long)
+        return tensor_samples
+
 class CountingSampleGenerator(LMSampleGenerator):
     def __init__(self, min_digits: int, max_digits: int, min_count: int, max_count: int):
         assert min_digits > 0, "min_digits must be > 0"
@@ -1291,44 +1431,61 @@ def validate_model(network: nn.Module, task: "LMTask"):
         validation_acc = n_correct / n_total
 
         if task.extended_validation_set is not None:
-            validate_model_extended(network, task)
+            n_correct_ext, n_total_ext, ext_validation_acc = validate_model_extended(network, task)
+        else:
+            n_correct_ext, n_total_ext, ext_validation_acc = 0, 0, 0.0
 
     network.train()
 
-    return n_correct, n_total, validation_acc
+    return n_correct, n_total, validation_acc, n_correct_ext, n_total_ext, ext_validation_acc
 
 
-def validate_model_extended(network: nn.Module, task: "LMTask") -> None:
+def validate_model_extended(network: nn.Module, task: "LMTask"):
     print("Evaluating on extended digit length samples...")
     extended_samples = task.extended_validation_set
-    if extended_samples is None:
-        return
+    assert extended_samples is not None
     assert task.further_extended_generator is not None, "Task does not have a further extended sample generator"
-    for i in range(extended_samples.size(0)):
-        print("Extended Sample:", task.further_extended_generator.pretty_to_str(extended_samples[i]))
     network.eval()
     with torch.no_grad():
         pred = greedy_decode(network, extended_samples)
-        print("Extended Samples Prediction:")
-        for i in range(extended_samples.size(0)):
-            print("Sample:", task.further_extended_generator.pretty_to_str(extended_samples[i]))
-            print("Output:", task.further_extended_generator.pretty_to_str(pred[i]))
-            print()
         correct = task.further_extended_generator.verify(pred, extended_samples)
-        n_correct = correct.sum().item()
+        if extended_samples.size(0) <= 10:
+            print("Extended Samples Prediction:")
+            for i in range(extended_samples.size(0)):
+                print("Sample:", task.further_extended_generator.pretty_to_str(extended_samples[i]))
+                print("Output:", task.further_extended_generator.pretty_to_str(pred[i]))
+                print()
+        else:
+            good_idx = correct.nonzero(as_tuple=True)[0]
+            for i in range(min(3, len(good_idx))):
+                print(f"Extended Good Sample {i}:")
+                print("Sample:", task.further_extended_generator.pretty_to_str(extended_samples[good_idx[i],:]))
+                print("Output:", task.further_extended_generator.pretty_to_str(pred[good_idx[i],:]))
+                print()
+
+            bad = correct.logical_not()
+            bad_idx = bad.nonzero(as_tuple=True)[0]
+            for i in range(min(3, len(bad_idx))):
+                print(f"Extended Bad Sample {i}:")
+                print("Sample:", task.further_extended_generator.pretty_to_str(extended_samples[bad_idx[i],:]))
+                print("Output:", task.further_extended_generator.pretty_to_str(pred[bad_idx[i],:]))
+                print()
+
+        n_correct = int(correct.sum().item())
         n_total = correct.size(0)
         ext_validation_acc = n_correct / n_total
-        print(f"Extended Validation Accuracy: {ext_validation_acc:.4f} ({n_correct}/{n_total})")
     network.train()
 
-def log_training_performance(result_dir: str, training_timestamp: str, step: int, loss: torch.Tensor, min_loss: float, n_correct: int, n_total: int, validation_acc: float, max_validation_acc: float):
+    return n_correct, n_total, ext_validation_acc
+
+def log_training_performance(result_dir: str, training_timestamp: str, step: int, loss: torch.Tensor, min_loss: float, n_correct: int, n_total: int, validation_acc: float, max_validation_acc: float, n_correct_ext: int, n_total_ext: int, ext_validation_acc: float):
     perf_path = os.path.join(result_dir, f"training_performance.txt")
     if not os.path.exists(perf_path):
         with open(perf_path, "w") as f:
-            f.write("TrainSessionStartTime\tTimeStamp\tStep\tLoss\tMinLoss\tNCorrect\tNTotal\tValAcc\tMaxValAcc\n")
+            f.write("TrainSessionStartTime\tTimeStamp\tStep\tLoss\tMinLoss\tNCorrect\tNTotal\tValAcc\tMaxValAcc\tNCorrectExt\tNTotalExt\tExtValAcc\n")
     with open(perf_path, "a") as f:
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        f.write(f"{training_timestamp}\t{timestamp}\t{step}\t{loss.item():.4f}\t{min_loss:.4f}\t{n_correct}\t{n_total}\t{validation_acc:.4f}\t{max_validation_acc:.4f}\n")
+        f.write(f"{training_timestamp}\t{timestamp}\t{step}\t{loss.item():.4f}\t{min_loss:.4f}\t{n_correct}\t{n_total}\t{validation_acc:.4f}\t{max_validation_acc:.4f}\t{n_correct_ext}\t{n_total_ext}\t{ext_validation_acc:.4f}\n")
 
 
 # ============================================================
@@ -1381,6 +1538,27 @@ def init_task(task_type: str, validation_set_size: int) -> LMTask:
         generator = TakeLastSampleGenerator(max_seq_len, vocab_size, max_separators=max_separators)
         required_ctx_len = max_seq_len * 2 # The model's max_len needs to accommodate the longest possible sequence (src + tgt)
         spec = f"maxSeq{max_seq_len}_maxSep{max_separators}"
+    elif task_type == "increment":
+        min_digits = 1
+        max_digits = 15
+        training_extend_digits = 1
+        eval_extend_digits = 2
+        extended_eval_samples = 64
+        generator = IncrementSampleGenerator(min_digits, max_digits)
+        vocab_size = generator.vocab_size
+        required_ctx_len = generator.max_seq_len
+        if training_extend_digits > 0:
+            extended_generator = IncrementSampleGenerator(min_digits, max_digits + training_extend_digits)
+            required_ctx_len = max(required_ctx_len, extended_generator.max_seq_len)
+        if eval_extend_digits > 0:
+            further_extended_generator = IncrementSampleGenerator(min_digits, max_digits + eval_extend_digits)
+            extended_validation_set = further_extended_generator.generate(extended_eval_samples)
+            extended_eval_boundary_set = further_extended_generator.generate_boundary_samples()
+            if extended_eval_boundary_set.numel() > 0:
+                extended_validation_set = torch.cat([extended_validation_set, extended_eval_boundary_set], dim=0)
+            required_ctx_len = max(required_ctx_len, further_extended_generator.max_seq_len)
+        spec = f"minD{min_digits}_maxD{max_digits}"
+        extra_validation_set = generator.generate_boundary_samples()
     elif task_type == "counting":
         min_digits = 1
         max_digits = 3
@@ -1411,6 +1589,7 @@ def init_task(task_type: str, validation_set_size: int) -> LMTask:
             extended_eval_boundary_set = further_extended_generator.generate_boundary_samples()
             if extended_eval_boundary_set.numel() > 0:
                 extended_validation_set = torch.cat([extended_validation_set, extended_eval_boundary_set], dim=0)
+            required_ctx_len = max(required_ctx_len, further_extended_generator.max_seq_len)
         spec = f"minD{min_digits}_maxD{max_digits}_minC{min_count}_maxC{max_count}"
         # add boundary samples for counting tasks (e.g. 99->100)
         extra_validation_set = generator.generate_boundary_samples()
@@ -1497,7 +1676,7 @@ def train():
     ### training hyperparameters
 
 
-    task_type = "countingCot" # "copy" or "takeLast" or "counting" or "countingCot" or "sticky"
+    task_type = "increment" # "copy" or "takeLast" or "increment" or "counting" or "countingCot" or "sticky"
     model_type = "ptrGen" # "ptrGen" or "tfPtrGen" or "tf"
     device = "cpu" # device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -1587,8 +1766,10 @@ def train():
         scheduler.step()
 
         if step % 200 == 0:
-            n_correct, n_total, validation_acc = validate_model(model.network, task)
+            n_correct, n_total, validation_acc, n_correct_ext, n_total_ext, ext_validation_acc = validate_model(model.network, task)
             print(f"Validation Accuracy: Prev Max = {max_validation_acc:.4f}, Curr = {validation_acc:.4f} ({n_correct}/{n_total})")
+            if n_total_ext > 0:
+                print(f"Extended Validation Accuracy: {ext_validation_acc:.4f} ({n_correct_ext}/{n_total_ext})")
             max_validation_acc = max(max_validation_acc, validation_acc)
 
             print(f"Step {step}, Loss: Prev Min = {min_loss:.4f}, Curr = {loss.item():.4f}")
@@ -1596,7 +1777,9 @@ def train():
 
             if save_results:
                 save_network_checkpoint(model.network, checkpoint_dir, step, training_session_timestamp)
-                log_training_performance(result_dir, training_session_timestamp, step, loss, min_loss, n_correct, n_total, validation_acc, max_validation_acc)
+                log_training_performance(result_dir, training_session_timestamp, step, 
+                                         loss, min_loss, n_correct, n_total, validation_acc, max_validation_acc,
+                                         n_correct_ext, n_total_ext, ext_validation_acc)
 
             print("------------------------------------")
             print("")
