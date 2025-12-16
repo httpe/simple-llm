@@ -105,12 +105,27 @@ def test_sticky_rule(n_training: int, n_validation: int, n_to_generate: int, min
 
 
     # validate samples generated from LLMs
-    llm_output_type = f"stickiness_{stickiness}{'strict' if strict else 'loose'}"
+    llm_output_type = f"stickiness_{stickiness}_{'strict' if strict else 'loose'}"
     if llm_output_type in llm_samples:
+        r_llm = []
         for name, samples in llm_samples[llm_output_type].items():
             print("LLM:", name)
-            validate_samples(validator, samples, training_samples)
+            r_new_samples, r_validate_samples = validate_samples(validator, samples, training_samples)
+            n_total = len(samples)
+            n_new = len(r_new_samples)
+            n_valid = len(r_validate_samples)
+            r_llm.append({
+                "name": name, 
+                "n_valid": n_valid, 
+                "n_new": n_new, 
+                "n_total": n_total, 
+                "accuracy": 100 * n_valid / n_new if n_new > 0 else 0.0
+                })
             print("")
+        print("Summary of LLM samples:")
+        print("Name|Valid|New|Total|Accuracy (Valid/New) %")
+        for record in r_llm:
+            print(f"{record['name']}|{record['n_valid']}|{record['n_new']}|{record['n_total']}|{record['accuracy']:0.2f}%")
 
     # baseline model, simply generate random characters from [A-Za-z0-9]
     reset_seeds()
@@ -623,7 +638,7 @@ def main():
     
     print("")
     stickiness = 1
-    strict_stickiness = True
+    strict_stickiness = False
     model_dir = os.path.join(SCRIPT_DIR, "model_checkpoints", f"stickiness_{stickiness}_{'strict' if strict_stickiness else 'loose'}")
     os.makedirs(model_dir, exist_ok=True)
     reset_seeds()
